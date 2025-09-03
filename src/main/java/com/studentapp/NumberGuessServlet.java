@@ -46,5 +46,10 @@ public class NumberGuessServlet extends HttpServlet {
         }
         out.println("<a href='guess'>Play Again</a>");
     }
+
+
+    // === Added for tests ===
+    public int getTargetNumber() { return targetNumber; }
+    void setTargetNumberForTest(int n) { this.targetNumber = n; }
 }
 
