@@ -12,6 +12,12 @@ public class NumberGuessServlet extends HttpServlet {
     private static final long serialVersionUID = 1L;
     private int targetNumber;
 
+    // Add this getter for testing
+    public int getTargetNumber() {
+        return targetNumber;
+    }
+
+
     public void init() throws ServletException {
         targetNumber = new Random().nextInt(100) + 1;
     }
