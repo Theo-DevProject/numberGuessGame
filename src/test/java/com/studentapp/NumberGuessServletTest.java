@@ -4,47 +4,66 @@ import static org.junit.Assert.*;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mockito;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
+
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpSession;
+
 import java.io.PrintWriter;
 import java.io.StringWriter;
 
 public class NumberGuessServletTest {
+
     private NumberGuessServlet servlet;
     private HttpServletRequest request;
     private HttpServletResponse response;
-    private StringWriter responseWriter;
+    private HttpSession session;
+    private StringWriter body;
 
     @Before
     public void setUp() throws Exception {
         servlet = new NumberGuessServlet();
-        servlet.init();
         request = Mockito.mock(HttpServletRequest.class);
         response = Mockito.mock(HttpServletResponse.class);
-        responseWriter = new StringWriter();
-        Mockito.when(response.getWriter()).thenReturn(new PrintWriter(responseWriter));
+        session = Mockito.mock(HttpSession.class);
+
+        body = new StringWriter();
+        Mockito.when(response.getWriter()).thenReturn(new PrintWriter(body));
+        Mockito.when(request.getSession()).thenReturn(session);
     }
 
     @Test
     public void testGuessTooLow() throws Exception {
+        // target = 50, user guesses 1
+        Mockito.when(session.getAttribute("target")).thenReturn(50);
         Mockito.when(request.getParameter("guess")).thenReturn("1");
+
         servlet.doPost(request, response);
-        assertTrue(responseWriter.toString().contains("Your guess is too low"));
+
+        assertTrue(body.toString().contains("too low"));
     }
 
     @Test
     public void testGuessTooHigh() throws Exception {
+        // target = 50, user guesses 100
+        Mockito.when(session.getAttribute("target")).thenReturn(50);
         Mockito.when(request.getParameter("guess")).thenReturn("100");
+
         servlet.doPost(request, response);
-        assertTrue(responseWriter.toString().contains("Your guess is too high"));
+
+        assertTrue(body.toString().contains("too high"));
     }
 
     @Test
     public void testCorrectGuess() throws Exception {
-        int correctGuess = servlet.getTargetNumber();
-        Mockito.when(request.getParameter("guess")).thenReturn(String.valueOf(correctGuess));
+        // target = 42, user guesses 42
+        Mockito.when(session.getAttribute("target")).thenReturn(42);
+        Mockito.when(request.getParameter("guess")).thenReturn("42");
+
         servlet.doPost(request, response);
-        assertTrue(responseWriter.toString().contains("Congratulations! You guessed the number!"));
+
+        assertTrue(body.toString().contains("Congratulations"));
+        // optionally verify it resets a new target in session:
+        Mockito.verify(session).setAttribute(Mockito.eq("target"), Mockito.anyInt());
     }
 }
-
