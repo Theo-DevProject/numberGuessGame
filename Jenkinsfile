@@ -4,16 +4,13 @@ pipeline {
   tools { jdk 'Java'; maven 'Maven' }
 
   parameters {
-    // === Nexus (your EIP) ===
     string(name: 'NEXUS_HOST', defaultValue: '52.21.103.235', description: 'Nexus host/IP')
     string(name: 'NEXUS_PORT', defaultValue: '8081', description: 'Nexus port')
     string(name: 'NEXUS_RELEASES_PATH', defaultValue: 'repository/maven-releases/', description: 'Releases path')
     string(name: 'NEXUS_SNAPSHOTS_PATH', defaultValue: 'repository/maven-snapshots/', description: 'Snapshots path')
 
-    // === SonarQube (your EIP) ===
     string(name: 'SONAR_HOST_URL', defaultValue: 'http://52.72.165.200:9000', description: 'SonarQube URL')
 
-    // === Tomcat (optional) ===
     booleanParam(name: 'DEPLOY_TO_TOMCAT', defaultValue: true, description: 'Deploy after Nexus')
     string(name: 'TOMCAT_HOST', defaultValue: 'YOUR_TOMCAT_IP', description: 'Tomcat host/IP')
     string(name: 'TOMCAT_USER', defaultValue: 'ubuntu', description: 'SSH user on Tomcat box')
@@ -24,18 +21,26 @@ pipeline {
   }
 
   environment {
-    // Nexus
     NEXUS_BASE = "http://${params.NEXUS_HOST}:${params.NEXUS_PORT}"
     NEXUS_RELEASES_ID  = 'nexus-releases'
     NEXUS_SNAPSHOTS_ID = 'nexus-snapshots'
-
-    // SonarQube: credential ID must exist in Jenkins as a Secret text
     SONAR_AUTH_TOKEN = credentials('sonar_token')
   }
 
   stages {
-    stage('Checkout SCM') {
-      steps { checkout scm }
+    stage('Checkout SCM') { steps { checkout scm } }
+
+    stage('Show branch') {
+      steps {
+        sh '''
+          echo "SCM remote:"
+          git remote -v || true
+          echo "Commit:"
+          git log -1 --oneline || true
+          echo "Detected branch (best effort):"
+          git rev-parse --abbrev-ref HEAD || true
+        '''
+      }
     }
 
     stage('Generate Maven settings.xml') {
@@ -56,9 +61,7 @@ pipeline {
     }
 
     stage('Build & Test') {
-      steps {
-        sh 'mvn -B -s jenkins-settings.xml clean verify'
-      }
+      steps { sh 'mvn -B -s jenkins-settings.xml clean verify' }
       post {
         always {
           junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
@@ -90,16 +93,14 @@ pipeline {
     }
 
     stage('Deploy to Nexus') {
-      // Only deploy from the testing branch for now
-      when { branch 'features/theoDev' }
+      when { anyOf { branch 'features/theoDev'; branch 'main'; branch 'master' } }
       steps {
         script {
           def version = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version", returnStdout: true).trim()
           def isSnapshot = version.endsWith('-SNAPSHOT')
           def repoId  = isSnapshot ? env.NEXUS_SNAPSHOTS_ID : env.NEXUS_RELEASES_ID
           def repoUrl = isSnapshot ? "${env.NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH}" : "${env.NEXUS_BASE}/${params.NEXUS_RELEASES_PATH}"
-          echo "Version: ${version} (snapshot? ${isSnapshot}) → ${repoId}"
-
+          echo "Version: ${version} (snapshot? ${isSnapshot}) → repoId=${repoId}"
           sh """
             mvn -B -s jenkins-settings.xml -DskipTests deploy \
               -DaltDeploymentRepository=${repoId}::default::${repoUrl}
@@ -109,17 +110,19 @@ pipeline {
     }
 
     stage('Deploy to Tomcat (SSH)') {
-      // Only from testing branch + controlled by checkbox
-      when { allOf { branch 'features/theoDev'; expression { return params.DEPLOY_TO_TOMCAT } } }
+      when {
+        allOf {
+          anyOf { branch 'features/theoDev'; branch 'main'; branch 'master' }
+          expression { return params.DEPLOY_TO_TOMCAT }
+        }
+      }
       steps {
         sshagent(credentials: ['tomcat_ssh']) {
           sh '''
             set -e
             WAR=$(ls target/*.war | head -n1)
             [ -f "$WAR" ] || { echo "WAR not found"; exit 1; }
-
             scp -o StrictHostKeyChecking=no "$WAR" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
-
             ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} bash -lc '
               sudo rm -rf ${TOMCAT_WEBAPPS}/${APP_NAME} ${TOMCAT_WEBAPPS}/${APP_NAME}.war
               sudo mv /home/${TOMCAT_USER}/${APP_NAME}.war ${TOMCAT_WEBAPPS}/
@@ -131,7 +134,6 @@ pipeline {
                 sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
               fi
             '
-
             echo "Waiting for deploy..."; sleep 8
             curl -fsS "http://${TOMCAT_HOST}:8080${HEALTH_PATH}" | head -c 400 || true
           '''
