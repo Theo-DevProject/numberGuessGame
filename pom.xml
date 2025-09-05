@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.studentapp</groupId>
+  <artifactId>NumberGuessGame</artifactId>
+  <version>1.0-SNAPSHOT</version>
+  <packaging>war</packaging>
+
+  <name>Number Guessing Game</name>
+  <url>http://maven.apache.org</url>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.surefire.plugin.version>3.2.5</maven.surefire.plugin.version>
+  </properties>
+
+  <dependencies>
+    <!-- Jakarta Servlet API for Tomcat 10+ -->
+    <dependency>
+      <groupId>jakarta.servlet</groupId>
+      <artifactId>jakarta.servlet-api</artifactId>
+      <version>6.0.0</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!-- JUnit 4 for Testing -->
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>4.13.2</version>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- Mockito for tests (optional) -->
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <version>5.12.0</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>NumberGuessGame</finalName>
+    <plugins>
+      <!-- Compiler Plugin (use release=17) -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.11.0</version>
+        <configuration>
+          <release>${maven.compiler.release}</release>
+        </configuration>
+      </plugin>
+
+      <!-- WAR Plugin -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-war-plugin</artifactId>
+        <version>3.4.0</version>
+        <configuration>
+          <failOnMissingWebXml>false</failOnMissingWebXml>
+        </configuration>
+      </plugin>
+
+      <!-- Surefire Plugin for Tests -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>${maven.surefire.plugin.version}</version>
+      </plugin>
+     <plugin>
+           <groupId>org.jacoco</groupId>
+           <artifactId>jacoco-maven-plugin</artifactId>
+           <version>0.8.11</version>
+           <executions>
+             <!-- Attach JaCoCo agent during tests -->
+             <execution>
+               <id>prepare-agent</id>
+               <goals><goal>prepare-agent</goal></goals>
+             </execution>
+             <!-- Generate XML report after tests -->
+         <execution>
+               <id>report</id>
+               <phase>verify</phase>
+               <goals><goal>report</goal></goals>
+               <configuration>
+                 <outputDirectory>${project.build.directory}/site/jacoco</outputDirectory>
+               </configuration>
+             </execution>
+         </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
