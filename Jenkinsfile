@@ -3,20 +3,21 @@ pipeline {
   options { timestamps() }
   tools { jdk 'Java'; maven 'Maven' }
 
-  parameters {
-    // Optional manual override when Jenkins is in detached HEAD
-    string(name: 'BRANCH_OVERRIDE', defaultValue: '', description: 'Override branch name (leave blank normally)')
+  triggers {
+    // Build when GitHub sends a push event (requires webhook below)
+    githubPush()
+  }
 
-    // === Nexus (your EIP) ===
+  parameters {
+    string(name: 'BRANCH_OVERRIDE', defaultValue: '', description: 'Override branch name (leave blank normally)')
+    // Nexus
     string(name: 'NEXUS_HOST',           defaultValue: '52.21.103.235', description: 'Nexus host/IP')
     string(name: 'NEXUS_PORT',           defaultValue: '8081',          description: 'Nexus port')
     string(name: 'NEXUS_RELEASES_PATH',  defaultValue: 'repository/maven-releases/',   description: 'Releases path')
     string(name: 'NEXUS_SNAPSHOTS_PATH', defaultValue: 'repository/maven-snapshots/',  description: 'Snapshots path')
-
-    // === SonarQube (your EIP) ===
+    // SonarQube
     string(name: 'SONAR_HOST_URL', defaultValue: 'http://52.72.165.200:9000', description: 'SonarQube URL')
-
-    // === Tomcat (optional) ===
+    // Tomcat (optional)
     booleanParam(name: 'DEPLOY_TO_TOMCAT', defaultValue: true, description: 'Deploy after Nexus')
     string(name: 'TOMCAT_HOST',    defaultValue: '54.236.97.199',                 description: 'Tomcat host/IP')
     string(name: 'TOMCAT_USER',    defaultValue: 'ubuntu',                        description: 'SSH user on Tomcat box')
@@ -24,16 +25,16 @@ pipeline {
     string(name: 'TOMCAT_BIN',     defaultValue: '/opt/apache-tomcat-10.1.44/bin',     description: 'Tomcat bin dir')
     string(name: 'APP_NAME',       defaultValue: 'NumberGuessGame',               description: 'WAR base name (no .war)')
     string(name: 'HEALTH_PATH',    defaultValue: '/NumberGuessGame/guess',        description: 'Health check path')
+
+    // Email
+    string(name: 'NOTIFY_TO', defaultValue: 'you@example.com', description: 'Comma-separated emails for notifications')
   }
 
   environment {
-    // Nexus
     NEXUS_BASE         = "http://${params.NEXUS_HOST}:${params.NEXUS_PORT}"
     NEXUS_RELEASES_ID  = 'nexus-releases'
     NEXUS_SNAPSHOTS_ID = 'nexus-snapshots'
-
-    // SonarQube: Secret Text credential ID in Jenkins
-    SONAR_AUTH_TOKEN = credentials('sonar_token')
+    SONAR_AUTH_TOKEN   = credentials('sonar_token')  // Secret Text
   }
 
   stages {
@@ -44,14 +45,9 @@ pipeline {
     stage('Detect branch') {
       steps {
         script {
-          // 1) try user override; 2) try normal short name; 3) map from remote refs containing HEAD
-          def override = (params.BRANCH_OVERRIDE ?: '').trim()
-          def shortName = sh(script: "git symbolic-ref -q --short HEAD || true", returnStdout: true).trim()
-          def fromRemote = sh(
-            script: "git branch -r --contains HEAD | sed -n 's#^[ *]*origin/##p' | head -n1",
-            returnStdout: true
-          ).trim()
-
+          def override   = (params.BRANCH_OVERRIDE ?: '').trim()
+          def shortName  = sh(script: "git symbolic-ref -q --short HEAD || true", returnStdout: true).trim()
+          def fromRemote = sh(script: "git branch -r --contains HEAD | sed -n 's#^[ *]*origin/##p' | head -n1", returnStdout: true).trim()
           env.CURRENT_BRANCH = override ?: (shortName ?: fromRemote ?: 'unknown')
           echo "Resolved branch: ${env.CURRENT_BRANCH}"
         }
@@ -75,11 +71,22 @@ pipeline {
       }
     }
 
-    stage('Build & Test') {
-      steps { sh 'mvn -B -s jenkins-settings.xml clean verify' }
+    stage('Build, Test, Coverage') {
+      steps {
+        // surefire + jacoco run from POM (see POM section below)
+        sh 'mvn -B -s jenkins-settings.xml clean verify'
+      }
       post {
         always {
           junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
+          // Coverage graph in Jenkins (install "JaCoCo" plugin)
+          publishJacoco(
+            execPattern: '**/target/jacoco.exec',
+            classPattern: '**/target/classes',
+            sourcePattern: '**/src/main/java',
+            inclusionPattern: '',
+            exclusionPattern: ''
+          )
           archiveArtifacts artifacts: 'target/*.war', fingerprint: true, onlyIfSuccessful: false
         }
       }
@@ -103,7 +110,6 @@ pipeline {
       steps { timeout(time: 10, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } }
     }
 
-    // ---------------- DEPLOYMENT STAGES ----------------
     stage('Deploy to Nexus') {
       when { expression { return env.CURRENT_BRANCH in ['features/theoDev','main','master'] } }
       steps {
@@ -125,12 +131,7 @@ pipeline {
     stage('Nexus Sanity Check') {
       when { expression { return env.CURRENT_BRANCH in ['features/theoDev','main','master'] } }
       steps {
-        sh '''
-          set -e
-          echo "Checking Nexus at ${NEXUS_BASE}"
-          curl -fsSI "${NEXUS_BASE}/service/rest/v1/status" > /dev/null
-          echo "✅ Nexus is reachable"
-        '''
+        sh 'curl -fsSI "${NEXUS_BASE}/service/rest/v1/status" > /dev/null && echo "✅ Nexus is reachable"'
       }
     }
 
@@ -146,12 +147,8 @@ pipeline {
           sh """
             set -e
             WAR=\$(ls target/*.war | head -n1)
-            [ -f \"\$WAR\" ] || { echo 'WAR not found'; exit 1; }
-
-            echo 'Copying WAR to ${TOMCAT_HOST} ...'
-            scp -o StrictHostKeyChecking=no \"\$WAR\" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
-
-            echo 'Restarting Tomcat and deploying WAR ...'
+            [ -f "\${WAR}" ] || { echo 'WAR not found'; exit 1; }
+            scp -o StrictHostKeyChecking=no "\${WAR}" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
             ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} bash -lc '
               set -e
               sudo rm -rf ${TOMCAT_WEBAPPS}/${APP_NAME} ${TOMCAT_WEBAPPS}/${APP_NAME}.war || true
@@ -180,23 +177,54 @@ pipeline {
         sh """
           set -e
           echo 'Checking health at http://${TOMCAT_HOST}:8080${HEALTH_PATH}'
-          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+          for i in \$(seq 1 12); do
             if curl -fsS "http://${TOMCAT_HOST}:8080${HEALTH_PATH}" | head -c 200; then
-              echo '✅ Health check passed'
-              exit 0
+              echo '✅ Health check passed'; exit 0
             fi
-            echo "⏳ App not ready yet... retry \$i/12"
-            sleep 5
+            echo "⏳ App not ready yet... retry \$i/12"; sleep 5
           done
-          echo '❌ Health check failed after 60s'
-          exit 1
+          echo '❌ Health check failed after 60s'; exit 1
         """
       }
     }
   }
 
   post {
-    success { echo '✅ Pipeline finished successfully' }
-    failure { echo '❌ Pipeline failed — check logs' }
+    success {
+      script {
+        emailext(
+          subject: "✅ SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+          to: params.NOTIFY_TO,
+          mimeType: 'text/html',
+          body: """
+            <h2>Build Succeeded</h2>
+            <p><b>Job:</b> ${env.JOB_NAME} #${env.BUILD_NUMBER}</p>
+            <p><b>Branch:</b> ${env.CURRENT_BRANCH}</p>
+            <p><a href="${env.BUILD_URL}">Open build</a></p>
+            <hr/>
+            <p>Test results and coverage graphs are available in the build page.</p>
+          """
+        )
+      }
+    }
+    failure {
+      script {
+        emailext(
+          subject: "❌ FAILURE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+          to: params.NOTIFY_TO,
+          mimeType: 'text/html',
+          attachmentsPattern: '**/target/surefire-reports/*.xml',
+          body: """
+            <h2>Build Failed</h2>
+            <p><b>Job:</b> ${env.JOB_NAME} #${env.BUILD_NUMBER}</p>
+            <p><b>Branch:</b> ${env.CURRENT_BRANCH}</p>
+            <p><a href="${env.BUILD_URL}console">Console log</a></p>
+            <hr/>
+            <p>JUnit XML attached (if available).</p>
+          """
+        )
+      }
+    }
+    always { echo 'Pipeline finished.' }
   }
 }
