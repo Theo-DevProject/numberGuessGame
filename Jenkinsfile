@@ -4,12 +4,16 @@ pipeline {
   tools { jdk 'JDK17'; maven 'Maven3' }
 
   parameters {
-    // Nexus
-    string(name: 'NEXUS_HOST', defaultValue: '18.232.94.39', description: 'Nexus host/IP')
+    // === Nexus (your EIP) ===
+    string(name: 'NEXUS_HOST', defaultValue: '52.21.103.235', description: 'Nexus host/IP')
     string(name: 'NEXUS_PORT', defaultValue: '8081', description: 'Nexus port')
     string(name: 'NEXUS_RELEASES_PATH', defaultValue: 'repository/maven-releases/', description: 'Releases path')
     string(name: 'NEXUS_SNAPSHOTS_PATH', defaultValue: 'repository/maven-snapshots/', description: 'Snapshots path')
-    // Tomcat (optional)
+
+    // === SonarQube (your EIP) ===
+    string(name: 'SONAR_HOST_URL', defaultValue: 'http://52.72.165.200:9000', description: 'SonarQube URL')
+
+    // === Tomcat (optional) ===
     booleanParam(name: 'DEPLOY_TO_TOMCAT', defaultValue: true, description: 'Deploy after Nexus')
     string(name: 'TOMCAT_HOST', defaultValue: 'YOUR_TOMCAT_IP', description: 'Tomcat host/IP')
     string(name: 'TOMCAT_USER', defaultValue: 'ubuntu', description: 'SSH user on Tomcat box')
@@ -20,13 +24,19 @@ pipeline {
   }
 
   environment {
+    // Nexus
     NEXUS_BASE = "http://${params.NEXUS_HOST}:${params.NEXUS_PORT}"
     NEXUS_RELEASES_ID  = 'nexus-releases'
     NEXUS_SNAPSHOTS_ID = 'nexus-snapshots'
+
+    // SonarQube: credential ID must exist in Jenkins as a Secret text
+    SONAR_AUTH_TOKEN = credentials('sonar_token')
   }
 
   stages {
-    stage('Checkout') { steps { checkout scm } }
+    stage('Checkout') {
+      steps { checkout scm }
+    }
 
     stage('Generate Maven settings.xml') {
       steps {
@@ -46,11 +56,36 @@ pipeline {
     }
 
     stage('Build & Test') {
-      steps { sh 'mvn -B -s jenkins-settings.xml clean verify' }
+      steps {
+        sh 'mvn -B -s jenkins-settings.xml clean verify'
+      }
       post {
         always {
           junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
           archiveArtifacts artifacts: 'target/*.war', fingerprint: true, onlyIfSuccessful: false
+        }
+      }
+    }
+
+    stage('Static Analysis (SonarQube)') {
+      steps {
+        // 'sonarqube' must match the name configured in Manage Jenkins → System → SonarQube servers
+        withSonarQubeEnv('sonarqube') {
+          sh """
+            mvn -B -s jenkins-settings.xml -DskipTests sonar:sonar \
+              -Dsonar.projectKey=com.studentapp:NumberGuessGame \
+              -Dsonar.projectName=NumberGuessGame \
+              -Dsonar.host.url=${SONAR_HOST_URL} \
+              -Dsonar.login=${SONAR_AUTH_TOKEN}
+          """
+        }
+      }
+    }
+
+    stage('Quality Gate') {
+      steps {
+        timeout(time: 10, unit: 'MINUTES') {
+          waitForQualityGate abortPipeline: true
         }
       }
     }
@@ -60,7 +95,8 @@ pipeline {
       when { branch 'features/theoDev' }
       steps {
         script {
-          def version = sh(script: "mvn -q -Dexec.executable=echo -Dexec.args='\\${project.version}' --non-recursive exec:exec", returnStdout: true).trim()
+          // safer than exec:exec; no extra plugin needed
+          def version = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version", returnStdout: true).trim()
           def isSnapshot = version.endsWith('-SNAPSHOT')
           def repoId  = isSnapshot ? env.NEXUS_SNAPSHOTS_ID : env.NEXUS_RELEASES_ID
           def repoUrl = isSnapshot ? "${env.NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH}" : "${env.NEXUS_BASE}/${params.NEXUS_RELEASES_PATH}"
