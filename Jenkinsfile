@@ -27,9 +27,6 @@ pipeline {
     string(name: 'TOMCAT_BIN',     defaultValue: '/opt/apache-tomcat-10.1.44/bin',     description: 'Tomcat bin dir')
     string(name: 'APP_NAME',       defaultValue: 'NumberGuessGame',               description: 'WAR base name (no .war)')
     string(name: 'HEALTH_PATH',    defaultValue: '/NumberGuessGame/guess',        description: 'Health check path')
-
-    // Email recipients (comma-separated)
-    string(name: 'NOTIFY_TO', defaultValue: 'you@example.com', description: 'Emails for notifications')
   }
 
   environment {
@@ -43,19 +40,14 @@ pipeline {
   }
 
   stages {
-    stage('Checkout SCM') {
-      steps { checkout scm }
-    }
+    stage('Checkout SCM') { steps { checkout scm } }
 
-    stage('Tool Install') {
-      steps { sh 'java -version && mvn -v' }
-    }
+    stage('Tool Install') { steps { sh 'java -version && mvn -v' } }
 
     stage('Detect branch') {
       steps {
         script {
           def override = (params.BRANCH_OVERRIDE ?: '').trim()
-          // Try several ways to get the branch name even on detached HEAD
           def shortRef  = sh(script: "git symbolic-ref -q --short HEAD || true", returnStdout: true).trim()
           def fromNote  = sh(script: "git name-rev --name-only HEAD | sed 's#^remotes/origin/##' || true", returnStdout: true).trim()
           def fromList  = sh(script: "git branch -r --contains HEAD | sed -n 's#^[ *]*origin/##p' | head -n1 || true", returnStdout: true).trim()
@@ -82,22 +74,15 @@ pipeline {
       }
     }
 
-    stage('Build, Test, Coverage') {
+    stage('Build, Test') {
       steps {
         sh 'mvn -B -s jenkins-settings.xml clean verify'
       }
       post {
         always {
           junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
-          // Requires "JaCoCo" plugin in Jenkins for the graph
-          publishJacoco(
-            execPattern: '**/target/jacoco.exec',
-            classPattern: '**/target/classes',
-            sourcePattern: '**/src/main/java',
-            inclusionPattern: '',
-            exclusionPattern: ''
-          )
-          archiveArtifacts artifacts: 'target/*.war', fingerprint: true, onlyIfSuccessful: false
+          // Archive WAR and (optionally) JaCoCo XML if your POM generates it
+          archiveArtifacts artifacts: 'target/*.war, target/site/jacoco/*.xml', allowEmptyArchive: true, fingerprint: true
         }
       }
     }
@@ -105,7 +90,6 @@ pipeline {
     stage('Static Analysis (SonarQube)') {
       steps {
         withSonarQubeEnv('sonarqube') {
-          // Use sonar.token (not deprecated sonar.login)
           sh """
             mvn -B -s jenkins-settings.xml -DskipTests sonar:sonar \
               -Dsonar.projectKey=com.studentapp:NumberGuessGame \
@@ -206,41 +190,6 @@ pipeline {
   }
 
   post {
-    success {
-      script {
-        emailext(
-          subject: "✅ SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-          to: params.NOTIFY_TO,
-          mimeType: 'text/html',
-          body: """
-            <h2>Build Succeeded</h2>
-            <p><b>Job:</b> ${env.JOB_NAME} #${env.BUILD_NUMBER}</p>
-            <p><b>Branch:</b> ${env.CURRENT_BRANCH}</p>
-            <p><a href="${env.BUILD_URL}">Open build</a></p>
-            <hr/>
-            <p>Test results and coverage graphs are available in the build page.</p>
-          """
-        )
-      }
-    }
-    failure {
-      script {
-        emailext(
-          subject: "❌ FAILURE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-          to: params.NOTIFY_TO,
-          mimeType: 'text/html',
-          attachmentsPattern: '**/target/surefire-reports/*.xml',
-          body: """
-            <h2>Build Failed</h2>
-            <p><b>Job:</b> ${env.JOB_NAME} #${env.BUILD_NUMBER}</p>
-            <p><b>Branch:</b> ${env.CURRENT_BRANCH}</p>
-            <p><a href="${env.BUILD_URL}console">Console log</a></p>
-            <hr/>
-            <p>JUnit XML attached (if available).</p>
-          """
-        )
-      }
-    }
     always { echo 'Pipeline finished.' }
   }
 }
