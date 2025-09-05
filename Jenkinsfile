@@ -3,21 +3,23 @@ pipeline {
   options { timestamps() }
   tools { jdk 'Java'; maven 'Maven' }
 
-  triggers {
-    // Build when GitHub sends a push event (requires webhook below)
-    githubPush()
-  }
+  // Auto-build when GitHub sends a push webhook
+  triggers { githubPush() }
 
   parameters {
-    string(name: 'BRANCH_OVERRIDE', defaultValue: '', description: 'Override branch name (leave blank normally)')
+    // Optional manual override (normally leave blank)
+    string(name: 'BRANCH_OVERRIDE', defaultValue: '', description: 'Override branch name if Jenkins can’t detect it')
+
     // Nexus
     string(name: 'NEXUS_HOST',           defaultValue: '52.21.103.235', description: 'Nexus host/IP')
     string(name: 'NEXUS_PORT',           defaultValue: '8081',          description: 'Nexus port')
     string(name: 'NEXUS_RELEASES_PATH',  defaultValue: 'repository/maven-releases/',   description: 'Releases path')
     string(name: 'NEXUS_SNAPSHOTS_PATH', defaultValue: 'repository/maven-snapshots/',  description: 'Snapshots path')
+
     // SonarQube
     string(name: 'SONAR_HOST_URL', defaultValue: 'http://52.72.165.200:9000', description: 'SonarQube URL')
-    // Tomcat (optional)
+
+    // Tomcat
     booleanParam(name: 'DEPLOY_TO_TOMCAT', defaultValue: true, description: 'Deploy after Nexus')
     string(name: 'TOMCAT_HOST',    defaultValue: '54.236.97.199',                 description: 'Tomcat host/IP')
     string(name: 'TOMCAT_USER',    defaultValue: 'ubuntu',                        description: 'SSH user on Tomcat box')
@@ -26,29 +28,38 @@ pipeline {
     string(name: 'APP_NAME',       defaultValue: 'NumberGuessGame',               description: 'WAR base name (no .war)')
     string(name: 'HEALTH_PATH',    defaultValue: '/NumberGuessGame/guess',        description: 'Health check path')
 
-    // Email
-    string(name: 'NOTIFY_TO', defaultValue: 'you@example.com', description: 'Comma-separated emails for notifications')
+    // Email recipients (comma-separated)
+    string(name: 'NOTIFY_TO', defaultValue: 'you@example.com', description: 'Emails for notifications')
   }
 
   environment {
+    // Nexus
     NEXUS_BASE         = "http://${params.NEXUS_HOST}:${params.NEXUS_PORT}"
     NEXUS_RELEASES_ID  = 'nexus-releases'
     NEXUS_SNAPSHOTS_ID = 'nexus-snapshots'
-    SONAR_AUTH_TOKEN   = credentials('sonar_token')  // Secret Text
+
+    // SonarQube token stored as a Secret Text credential in Jenkins
+    SONAR_AUTH_TOKEN   = credentials('sonar_token')
   }
 
   stages {
-    stage('Checkout SCM') { steps { checkout scm } }
+    stage('Checkout SCM') {
+      steps { checkout scm }
+    }
 
-    stage('Tool Install') { steps { sh 'java -version && mvn -v' } }
+    stage('Tool Install') {
+      steps { sh 'java -version && mvn -v' }
+    }
 
     stage('Detect branch') {
       steps {
         script {
-          def override   = (params.BRANCH_OVERRIDE ?: '').trim()
-          def shortName  = sh(script: "git symbolic-ref -q --short HEAD || true", returnStdout: true).trim()
-          def fromRemote = sh(script: "git branch -r --contains HEAD | sed -n 's#^[ *]*origin/##p' | head -n1", returnStdout: true).trim()
-          env.CURRENT_BRANCH = override ?: (shortName ?: fromRemote ?: 'unknown')
+          def override = (params.BRANCH_OVERRIDE ?: '').trim()
+          // Try several ways to get the branch name even on detached HEAD
+          def shortRef  = sh(script: "git symbolic-ref -q --short HEAD || true", returnStdout: true).trim()
+          def fromNote  = sh(script: "git name-rev --name-only HEAD | sed 's#^remotes/origin/##' || true", returnStdout: true).trim()
+          def fromList  = sh(script: "git branch -r --contains HEAD | sed -n 's#^[ *]*origin/##p' | head -n1 || true", returnStdout: true).trim()
+          env.CURRENT_BRANCH = override ?: (shortRef ?: (fromNote ?: (fromList ?: 'unknown')))
           echo "Resolved branch: ${env.CURRENT_BRANCH}"
         }
       }
@@ -73,13 +84,12 @@ pipeline {
 
     stage('Build, Test, Coverage') {
       steps {
-        // surefire + jacoco run from POM (see POM section below)
         sh 'mvn -B -s jenkins-settings.xml clean verify'
       }
       post {
         always {
           junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
-          // Coverage graph in Jenkins (install "JaCoCo" plugin)
+          // Requires "JaCoCo" plugin in Jenkins for the graph
           publishJacoco(
             execPattern: '**/target/jacoco.exec',
             classPattern: '**/target/classes',
@@ -95,12 +105,13 @@ pipeline {
     stage('Static Analysis (SonarQube)') {
       steps {
         withSonarQubeEnv('sonarqube') {
+          // Use sonar.token (not deprecated sonar.login)
           sh """
             mvn -B -s jenkins-settings.xml -DskipTests sonar:sonar \
               -Dsonar.projectKey=com.studentapp:NumberGuessGame \
               -Dsonar.projectName=NumberGuessGame \
               -Dsonar.host.url=${SONAR_HOST_URL} \
-              -Dsonar.login=${SONAR_AUTH_TOKEN}
+              -Dsonar.token=${SONAR_AUTH_TOKEN}
           """
         }
       }
@@ -111,7 +122,7 @@ pipeline {
     }
 
     stage('Deploy to Nexus') {
-      when { expression { return env.CURRENT_BRANCH in ['features/theoDev','main','master'] } }
+      when { expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] } }
       steps {
         script {
           def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version", returnStdout: true).trim()
@@ -120,6 +131,7 @@ pipeline {
           def repoUrl    = isSnapshot ? "${env.NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH}"
                                       : "${env.NEXUS_BASE}/${params.NEXUS_RELEASES_PATH}"
           echo "Version: ${version} (snapshot? ${isSnapshot}) → ${repoId} @ ${repoUrl}"
+
           sh """
             mvn -B -s jenkins-settings.xml -DskipTests deploy \
               -DaltDeploymentRepository=${repoId}::default::${repoUrl}
@@ -129,7 +141,7 @@ pipeline {
     }
 
     stage('Nexus Sanity Check') {
-      when { expression { return env.CURRENT_BRANCH in ['features/theoDev','main','master'] } }
+      when { expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] } }
       steps {
         sh 'curl -fsSI "${NEXUS_BASE}/service/rest/v1/status" > /dev/null && echo "✅ Nexus is reachable"'
       }
@@ -138,7 +150,7 @@ pipeline {
     stage('Deploy WAR to Tomcat') {
       when {
         allOf {
-          expression { return env.CURRENT_BRANCH in ['features/theoDev','main','master'] }
+          expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] }
           expression { return params.DEPLOY_TO_TOMCAT }
         }
       }
@@ -148,7 +160,11 @@ pipeline {
             set -e
             WAR=\$(ls target/*.war | head -n1)
             [ -f "\${WAR}" ] || { echo 'WAR not found'; exit 1; }
+
+            echo "Copying \${WAR} to ${TOMCAT_HOST} ..."
             scp -o StrictHostKeyChecking=no "\${WAR}" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
+
+            echo "Restarting Tomcat and deploying WAR ..."
             ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} bash -lc '
               set -e
               sudo rm -rf ${TOMCAT_WEBAPPS}/${APP_NAME} ${TOMCAT_WEBAPPS}/${APP_NAME}.war || true
@@ -169,7 +185,7 @@ pipeline {
     stage('Health Check') {
       when {
         allOf {
-          expression { return env.CURRENT_BRANCH in ['features/theoDev','main','master'] }
+          expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] }
           expression { return params.DEPLOY_TO_TOMCAT }
         }
       }
