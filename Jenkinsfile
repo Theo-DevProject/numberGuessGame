@@ -7,15 +7,15 @@ pipeline {
         MAVEN_HOME = tool name: 'Maven3', type: 'maven'
 
         // Nexus repo URL
-        NEXUS_REPO = "http://<NEXUS_SERVER_IP>:8081/repository/maven-releases/"
+        NEXUS_REPO = "http://http://18.197.140.193:8081/repository/maven-releases/"
 
         // SonarQube server (configured in Jenkins > Manage Jenkins > Configure System)
         SONARQUBE_ENV = "MySonarQube_1"
 
         // Deployment target
-        TOMCAT_HOST = "<TOMCAT_SERVER_IP>"
+        TOMCAT_HOST = "http://3.121.159.70:8080"
         TOMCAT_USER = "ec2-user"
-        TOMCAT_PATH = "/opt/tomcat/webapps/"
+        TOMCAT_PATH = "/opt/tomcat-7.0.94/webapps/"
     }
 
     stages {
