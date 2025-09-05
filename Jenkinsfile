@@ -121,6 +121,17 @@ pipeline {
         }
       }
     }
+stage('Nexus Sanity Check') {
+      when { anyOf { branch 'features/theoDev'; branch 'main'; branch 'master' } }
+      steps {
+        sh '''
+          set -e
+          echo "Checking Nexus availability at ${NEXUS_BASE}"
+          curl -fsSI "${NEXUS_BASE}/service/rest/v1/status" > /dev/null
+          echo "✅ Nexus is reachable"
+        '''
+      }
+    }
 stage('Deploy to Tomcat (SSH)') {
   when {
     allOf {
@@ -161,6 +172,60 @@ stage('Deploy to Tomcat (SSH)') {
     }
   }
 }
+stage('Deploy to Tomcat (SSH)') {
+      when { allOf { branch 'features/theoDev'; expression { return params.DEPLOY_TO_TOMCAT } } }
+      steps {
+        sshagent(credentials: ['tomcat_ssh']) {
+          sh '''
+            set -e
+            WAR=$(ls target/*.war | head -n1)
+            [ -f "$WAR" ] || { echo "WAR not found"; exit 1; }
+
+            scp -o StrictHostKeyChecking=no "$WAR" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
+
+            ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} bash -lc '
+              sudo rm -rf ${TOMCAT_WEBAPPS}/${APP_NAME} ${TOMCAT_WEBAPPS}/${APP_NAME}.war
+              sudo mv /home/${TOMCAT_USER}/${APP_NAME}.war ${TOMCAT_WEBAPPS}/
+              if [ -x ${TOMCAT_BIN}/shutdown.sh ]; then
+                sudo ${TOMCAT_BIN}/shutdown.sh || true
+                sleep 3
+                sudo ${TOMCAT_BIN}/startup.sh
+              else
+                sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
+              fi
+            '
+          '''
+        }
+      }
+    }
+
+    // 👉 ADD THIS RIGHT AFTER
+    stage('Health Check') {
+      when {
+        allOf {
+          expression { return params.DEPLOY_TO_TOMCAT }
+          anyOf { branch 'features/theoDev'; branch 'main'; branch 'master' }
+        }
+      }
+      steps {
+        script {
+          echo "Checking health at http://${params.TOMCAT_HOST}:8080${params.HEALTH_PATH}"
+        }
+        sh '''
+          set -e
+          for i in {1..12}; do
+            if curl -fsS "http://${TOMCAT_HOST}:8080${HEALTH_PATH}" | head -c 200; then
+              echo "✅ Health check passed"
+              exit 0
+            fi
+            echo "⏳ App not ready yet... retry $i/12"
+            sleep 5
+          done
+          echo "❌ Health check failed after 60s"
+          exit 1
+        '''
+      }
+    }
   }
 
   post {
