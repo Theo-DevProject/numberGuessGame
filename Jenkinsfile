@@ -4,34 +4,31 @@ pipeline {
   tools { jdk 'Java'; maven 'Maven' }
 
   parameters {
-    // ===== Nexus =====
-    string(name: 'NEXUS_HOST',            defaultValue: '52.21.103.235', description: 'Nexus host/IP (Elastic IP)')
-    string(name: 'NEXUS_PORT',            defaultValue: '8081',          description: 'Nexus port')
-    string(name: 'NEXUS_RELEASES_PATH',   defaultValue: 'repository/maven-releases/',  description: 'Releases path')
-    string(name: 'NEXUS_SNAPSHOTS_PATH',  defaultValue: 'repository/maven-snapshots/', description: 'Snapshots path')
-    booleanParam(name: 'DEPLOY_TO_NEXUS', defaultValue: true, description: 'Deploy artifacts to Nexus')
+    string(name: 'NEXUS_HOST',          defaultValue: '52.21.103.235', description: 'Nexus host/IP')
+    string(name: 'NEXUS_PORT',          defaultValue: '8081',          description: 'Nexus port')
+    string(name: 'NEXUS_RELEASES_PATH', defaultValue: 'repository/maven-releases/',  description: 'Releases path')
+    string(name: 'NEXUS_SNAPSHOTS_PATH',defaultValue: 'repository/maven-snapshots/', description: 'Snapshots path')
 
-    // ===== Tomcat (webServer) =====
-    booleanParam(name: 'DEPLOY_TO_TOMCAT', defaultValue: true, description: 'Deploy WAR to Tomcat after Nexus')
-    string(name: 'TOMCAT_HOST',   defaultValue: '54.236.97.199',                           description: 'Tomcat host/IP (Elastic IP)')
-    string(name: 'TOMCAT_USER',   defaultValue: 'ubuntu',                                   description: 'SSH user on Tomcat')
-    string(name: 'TOMCAT_WEBAPPS',defaultValue: '/opt/apache-tomcat-10.1.44/webapps',       description: 'Tomcat webapps dir')
-    string(name: 'TOMCAT_BIN',    defaultValue: '/opt/apache-tomcat-10.1.44/bin',           description: 'Tomcat bin dir')
-    string(name: 'APP_NAME',      defaultValue: 'NumberGuessGame',                          description: 'WAR base name (no .war)')
-    string(name: 'HEALTH_PATH',   defaultValue: '/NumberGuessGame/guess',                   description: 'HTTP path to check after deploy')
+    string(name: 'SONAR_HOST_URL',      defaultValue: 'http://52.72.165.200:9000',   description: 'SonarQube URL')
+
+    booleanParam(name: 'DEPLOY_TO_TOMCAT', defaultValue: true, description: 'Deploy after Nexus')
+    string(name: 'TOMCAT_HOST',         defaultValue: 'YOUR_TOMCAT_IP',              description: 'Tomcat host/IP')
+    string(name: 'TOMCAT_USER',         defaultValue: 'ubuntu',                      description: 'SSH user on Tomcat box')
+    string(name: 'TOMCAT_WEBAPPS',      defaultValue: '/opt/apache-tomcat-10.1.44/webapps', description: 'Tomcat webapps dir')
+    string(name: 'TOMCAT_BIN',          defaultValue: '/opt/apache-tomcat-10.1.44/bin',     description: 'Tomcat bin dir')
+    string(name: 'APP_NAME',            defaultValue: 'NumberGuessGame',             description: 'WAR base name (no .war)')
+    string(name: 'HEALTH_PATH',         defaultValue: '/NumberGuessGame/guess',      description: 'Health check path')
   }
 
   environment {
-    // Nexus
-    NEXUS_BASE = "http://${params.NEXUS_HOST}:${params.NEXUS_PORT}"
+    NEXUS_BASE         = "http://${params.NEXUS_HOST}:${params.NEXUS_PORT}"
     NEXUS_RELEASES_ID  = 'nexus-releases'
     NEXUS_SNAPSHOTS_ID = 'nexus-snapshots'
+    SONAR_AUTH_TOKEN   = credentials('sonar_token')
   }
 
   stages {
-    stage('Checkout SCM') {
-      steps { checkout scm }
-    }
+    stage('Checkout')           { steps { checkout scm } }
 
     stage('Generate Maven settings.xml') {
       steps {
@@ -51,9 +48,7 @@ pipeline {
     }
 
     stage('Build & Test') {
-      steps {
-        sh 'mvn -B -s jenkins-settings.xml clean verify'
-      }
+      steps { sh 'mvn -B -s jenkins-settings.xml clean verify' }
       post {
         always {
           junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
@@ -62,18 +57,44 @@ pipeline {
       }
     }
 
+    stage('Static Analysis (SonarQube)') {
+      steps {
+        withSonarQubeEnv('sonarqube') {
+          sh """
+            mvn -B -s jenkins-settings.xml -DskipTests sonar:sonar \
+              -Dsonar.projectKey=com.studentapp:NumberGuessGame \
+              -Dsonar.projectName=NumberGuessGame \
+              -Dsonar.host.url=${SONAR_HOST_URL} \
+              -Dsonar.login=${SONAR_AUTH_TOKEN}
+          """
+        }
+      }
+    }
+
+    stage('Quality Gate') {
+      steps {
+        timeout(time: 10, unit: 'MINUTES') {
+          waitForQualityGate abortPipeline: true
+        }
+      }
+    }
+
     stage('Deploy to Nexus') {
-      when { expression { return params.DEPLOY_TO_NEXUS } }
+      when {
+        anyOf {
+          branch 'features/theoDev'
+          branch 'main'
+          branch 'master'
+        }
+      }
       steps {
         script {
-          // robust: no extra plugin required
-          def version = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",
-                           returnStdout: true).trim()
+          def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version", returnStdout: true).trim()
           def isSnapshot = version.endsWith('-SNAPSHOT')
-          def repoId  = isSnapshot ? env.NEXUS_SNAPSHOTS_ID : env.NEXUS_RELEASES_ID
-          def repoUrl = isSnapshot ? "${env.NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH}"
-                                   : "${env.NEXUS_BASE}/${params.NEXUS_RELEASES_PATH}"
-          echo "Deploying version ${version} -> ${repoId} @ ${repoUrl}"
+          def repoId     = isSnapshot ? env.NEXUS_SNAPSHOTS_ID : env.NEXUS_RELEASES_ID
+          def repoUrl    = isSnapshot ? "${env.NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH}"
+                                      : "${env.NEXUS_BASE}/${params.NEXUS_RELEASES_PATH}"
+          echo "Version: ${version} (snapshot? ${isSnapshot}) → ${repoId}"
 
           sh """
             mvn -B -s jenkins-settings.xml -DskipTests deploy \
@@ -83,45 +104,49 @@ pipeline {
       }
     }
 
-stage('Deploy to Tomcat (SSH)') {
-  when { allOf { anyOf { branch 'features/theoDev'; branch 'main'; branch 'master' },
-                 expression { return params.DEPLOY_TO_TOMCAT } } }
-  steps {
-    sshagent(credentials: ['tomcat_ssh']) {
-      sh """
-        set -eux
-        WAR=\$(ls -1 target/*.war | head -n1)
-        [ -f "\$WAR" ] || { echo "WAR not found in target/"; exit 1; }
-        echo "Local WAR: \$WAR"
+    stage('Deploy to Tomcat (SSH)') {
+      when {
+        allOf {
+          anyOf {
+            branch 'features/theoDev'
+            branch 'main'
+            branch 'master'
+          }
+          expression { return params.DEPLOY_TO_TOMCAT }
+        }
+      }
+      steps {
+        sshagent(credentials: ['tomcat_ssh']) {
+          sh """
+            set -eux
+            WAR=\$(ls -1 target/*.war | head -n1)
+            [ -f "\$WAR" ] || { echo "WAR not found in target/"; exit 1; }
+            echo "Local WAR: \$WAR"
 
-        # 1) copy to home and verify
-        scp -o StrictHostKeyChecking=no "\$WAR" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
-        ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} 'set -eux; ls -l /home/${TOMCAT_USER}/${APP_NAME}.war'
+            scp -o StrictHostKeyChecking=no "\$WAR" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
+            ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} 'set -eux; ls -l /home/${TOMCAT_USER}/${APP_NAME}.war'
 
-        # 2) move into webapps and restart
-        ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} '
-          set -eux
-          sudo rm -rf ${TOMCAT_WEBAPPS}/${APP_NAME} ${TOMCAT_WEBAPPS}/${APP_NAME}.war || true
-          sudo mv -v /home/${TOMCAT_USER}/${APP_NAME}.war ${TOMCAT_WEBAPPS}/
-          if [ -x ${TOMCAT_BIN}/shutdown.sh ]; then
-            sudo ${TOMCAT_BIN}/shutdown.sh || true
-            sleep 3
-            sudo ${TOMCAT_BIN}/startup.sh
-          else
-            sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
-          fi
-          ls -l ${TOMCAT_WEBAPPS} | sed -n "1,80p"
-        '
+            ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} '
+              set -eux
+              sudo rm -rf ${TOMCAT_WEBAPPS}/${APP_NAME} ${TOMCAT_WEBAPPS}/${APP_NAME}.war || true
+              sudo mv -v /home/${TOMCAT_USER}/${APP_NAME}.war ${TOMCAT_WEBAPPS}/
+              if [ -x ${TOMCAT_BIN}/shutdown.sh ]; then
+                sudo ${TOMCAT_BIN}/shutdown.sh || true
+                sleep 3
+                sudo ${TOMCAT_BIN}/startup.sh
+              else
+                sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
+              fi
+              ls -l ${TOMCAT_WEBAPPS} | sed -n "1,80p"
+            '
 
-        # 3) quick health probe
-        echo "Waiting for Tomcat to redeploy..."
-        sleep 8
-        curl -fsS "http://${TOMCAT_HOST}:8080${HEALTH_PATH}" | head -c 400 || true
-      """
+            echo "Waiting for Tomcat to redeploy..."
+            sleep 8
+            curl -fsS "http://${TOMCAT_HOST}:8080${HEALTH_PATH}" | head -c 400 || true
+          """
+        }
+      }
     }
-  }
-}
-
   }
 
   post {
