@@ -1,7 +1,7 @@
 pipeline {
   agent any
   options { timestamps(); ansiColor('xterm') }
-  tools { jdk 'JDK17'; maven 'Maven3' }
+  tools { jdk 'Java'; maven 'Maven' }
 
   parameters {
     // === Nexus (your EIP) ===
