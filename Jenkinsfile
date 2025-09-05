@@ -123,45 +123,45 @@ pipeline {
     }
 
     stage('Deploy to Tomcat (SSH)') {
-      when {
-        allOf {
-          expression {
-            def b = (env.GIT_BRANCH ?: env.BRANCH_NAME ?: '').trim()
-            return b.endsWith('/features/theoDev') || b == 'features/theoDev' ||
-                   b.endsWith('/main')            || b == 'main' ||
-                   b.endsWith('/master')          || b == 'master'
-          }
-          expression { return params.DEPLOY_TO_TOMCAT }
-        }
+  when {
+    allOf {
+      expression {
+        def b = (env.GIT_BRANCH ?: env.BRANCH_NAME ?: '').trim()
+        return b.endsWith('/features/theoDev') || b == 'features/theoDev' ||
+               b.endsWith('/main')            || b == 'main' ||
+               b.endsWith('/master')          || b == 'master'
       }
-      steps {
-        sshagent(credentials: ['tomcat_ssh']) {
-          sh '''
-            set -euo pipefail
-            WAR=$(ls -1 target/*.war | head -n1)
-            echo "WAR to ship: $WAR"
-            scp -o StrictHostKeyChecking=no "$WAR" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
-            ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} bash -lc '
-              set -euo pipefail
-              echo "Deploying to ${TOMCAT_WEBAPPS} and restarting Tomcat..."
-              sudo rm -rf ${TOMCAT_WEBAPPS}/${APP_NAME} ${TOMCAT_WEBAPPS}/${APP_NAME}.war || true
-              sudo mv /home/${TOMCAT_USER}/${APP_NAME}.war ${TOMCAT_WEBAPPS}/
-              if [ -x ${TOMCAT_BIN}/shutdown.sh ] && [ -x ${TOMCAT_BIN}/startup.sh ]; then
-                sudo ${TOMCAT_BIN}/shutdown.sh || true
-                sleep 3
-                sudo ${TOMCAT_BIN}/startup.sh
-              else
-                sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
-              fi
-              echo "Listing ${TOMCAT_WEBAPPS}:"
-              ls -l ${TOMCAT_WEBAPPS} | sed -n "1,200p"
-            '
-            echo "Health check (best effort):"
-            curl -fsS "http://${TOMCAT_HOST}:8080${HEALTH_PATH}" | head -c 400 || true
-          '''
-        }
-      }
+      expression { return params.DEPLOY_TO_TOMCAT }
     }
+  }
+  steps {
+    sshagent(credentials: ['tomcat_ssh']) {
+      sh '''
+        set -e
+        WAR=$(ls -1 target/*.war | head -n1)
+        echo "WAR to ship: $WAR"
+        scp -o StrictHostKeyChecking=no "$WAR" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
+        ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} "bash -lc '
+          set -euo pipefail
+          echo Deploying WAR to ${TOMCAT_WEBAPPS}
+          sudo rm -rf ${TOMCAT_WEBAPPS}/${APP_NAME} ${TOMCAT_WEBAPPS}/${APP_NAME}.war || true
+          sudo mv /home/${TOMCAT_USER}/${APP_NAME}.war ${TOMCAT_WEBAPPS}/
+          if [ -x ${TOMCAT_BIN}/shutdown.sh ] && [ -x ${TOMCAT_BIN}/startup.sh ]; then
+            sudo ${TOMCAT_BIN}/shutdown.sh || true
+            sleep 3
+            sudo ${TOMCAT_BIN}/startup.sh
+          else
+            sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
+          fi
+          echo "Deployed. Listing ${TOMCAT_WEBAPPS}:"
+          ls -l ${TOMCAT_WEBAPPS}
+        '"
+        echo "Health check (best effort):"
+        curl -fsS "http://${TOMCAT_HOST}:8080${HEALTH_PATH}" | head -c 400 || true
+      '''
+    }
+  }
+}
   }
 
   post {
