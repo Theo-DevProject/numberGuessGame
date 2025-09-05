@@ -51,7 +51,8 @@ pipeline {
                 withSonarQubeEnv("${SONARQUBE_ENV}") {
                     sh """
                         ${MAVEN_HOME}/bin/mvn sonar:sonar \
-                          mvn clean verify sonar:sonar \ine-javaweb \
+                    
+                          -Dsonar.projectKey=pipeline-javaweb \
                           -Dsonar.projectName='pipeline javaweb' \
                           -Dsonar.host.url=http://3.77.144.146:9000 \
                           -Dsonar.token=sqp_f1265b7d3a9f95ab1e6d5788827aea161c4147f4
