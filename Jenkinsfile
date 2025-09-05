@@ -15,7 +15,7 @@ pipeline {
 
     // === Tomcat (optional) ===
     booleanParam(name: 'DEPLOY_TO_TOMCAT', defaultValue: true, description: 'Deploy after Nexus')
-    string(name: 'TOMCAT_HOST', defaultValue: 'YOUR_TOMCAT_IP', description: 'Tomcat host/IP')
+    string(name: 'TOMCAT_HOST', defaultValue: '54.236.97.199', description: 'Tomcat host/IP')   // 
     string(name: 'TOMCAT_USER', defaultValue: 'ubuntu', description: 'SSH user on Tomcat box')
     string(name: 'TOMCAT_WEBAPPS', defaultValue: '/opt/apache-tomcat-10.1.44/webapps', description: 'Tomcat webapps dir')
     string(name: 'TOMCAT_BIN', defaultValue: '/opt/apache-tomcat-10.1.44/bin', description: 'Tomcat bin dir')
