@@ -121,8 +121,7 @@ pipeline {
         }
       }
     }
-
-    stage('Deploy to Tomcat (SSH)') {
+stage('Deploy to Tomcat (SSH)') {
   when {
     allOf {
       expression {
