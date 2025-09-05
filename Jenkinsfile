@@ -55,7 +55,7 @@ pipeline {
                           -Dsonar.projectKey=pipeline-javaweb \
                           -Dsonar.projectName='pipeline javaweb' \
                           -Dsonar.host.url=http://3.77.144.146:9000 \
-                          -Dsonar.token=sqp_f1265b7d3a9f95ab1e6d5788827aea161c4147f4
+                          -Dsonar.token=sqa_f65a1a1621ed88b728e60e3a3efb1c7179f11ea8
                     """
                 }
             }
