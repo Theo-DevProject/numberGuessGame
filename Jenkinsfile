@@ -84,24 +84,25 @@ pipeline {
     }
 
 stage('Deploy to Tomcat (SSH)') {
-  when { allOf { branch 'features/theoDev'; expression { return params.DEPLOY_TO_TOMCAT } } }
+  when { allOf { anyOf { branch 'features/theoDev'; branch 'main'; branch 'master' },
+                 expression { return params.DEPLOY_TO_TOMCAT } } }
   steps {
     sshagent(credentials: ['tomcat_ssh']) {
-      sh '''
-        #!/bin/bash
-        set -euo pipefail
+      sh """
+        set -eux
+        WAR=\$(ls -1 target/*.war | head -n1)
+        [ -f "\$WAR" ] || { echo "WAR not found in target/"; exit 1; }
+        echo "Local WAR: \$WAR"
 
-        WAR=$(ls target/*.war | head -n1)
-        [ -f "$WAR" ] || { echo "WAR not found"; exit 1; }
+        # 1) copy to home and verify
+        scp -o StrictHostKeyChecking=no "\$WAR" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
+        ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} 'set -eux; ls -l /home/${TOMCAT_USER}/${APP_NAME}.war'
 
-        echo "Copying $WAR to ${TOMCAT_HOST} ..."
-        scp -o StrictHostKeyChecking=no "$WAR" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
-
-        echo "Restarting Tomcat and deploying WAR ..."
-        ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} bash -lc "
-          set -e
+        # 2) move into webapps and restart
+        ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} '
+          set -eux
           sudo rm -rf ${TOMCAT_WEBAPPS}/${APP_NAME} ${TOMCAT_WEBAPPS}/${APP_NAME}.war || true
-          sudo mv /home/${TOMCAT_USER}/${APP_NAME}.war ${TOMCAT_WEBAPPS}/
+          sudo mv -v /home/${TOMCAT_USER}/${APP_NAME}.war ${TOMCAT_WEBAPPS}/
           if [ -x ${TOMCAT_BIN}/shutdown.sh ]; then
             sudo ${TOMCAT_BIN}/shutdown.sh || true
             sleep 3
@@ -109,15 +110,18 @@ stage('Deploy to Tomcat (SSH)') {
           else
             sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
           fi
-        "
+          ls -l ${TOMCAT_WEBAPPS} | sed -n "1,80p"
+        '
 
-        echo "Waiting for deploy..."
+        # 3) quick health probe
+        echo "Waiting for Tomcat to redeploy..."
         sleep 8
         curl -fsS "http://${TOMCAT_HOST}:8080${HEALTH_PATH}" | head -c 400 || true
-      '''
+      """
     }
   }
 }
+
   }
 
   post {
