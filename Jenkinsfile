@@ -83,43 +83,41 @@ pipeline {
       }
     }
 
-    stage('Deploy to Tomcat (SSH)') {
-      when { expression { return params.DEPLOY_TO_TOMCAT } }
-      steps {
-        sshagent(credentials: ['tomcat_ssh']) {
-          sh '''
-            set -euo pipefail
-            echo "Finding WAR…"
-            WAR_FILE="$(ls target/*.war | head -n1)"
-            [ -f "$WAR_FILE" ] || { echo "WAR not found in target/"; exit 1; }
+stage('Deploy to Tomcat (SSH)') {
+  when { allOf { branch 'features/theoDev'; expression { return params.DEPLOY_TO_TOMCAT } } }
+  steps {
+    sshagent(credentials: ['tomcat_ssh']) {
+      sh '''
+        #!/bin/bash
+        set -euo pipefail
 
-            echo "Copying $WAR_FILE to ${TOMCAT_HOST}…"
-            scp -o StrictHostKeyChecking=no "$WAR_FILE" \
-                "${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war"
+        WAR=$(ls target/*.war | head -n1)
+        [ -f "$WAR" ] || { echo "WAR not found"; exit 1; }
 
-            echo "Restarting Tomcat and deploying…"
-            ssh -o StrictHostKeyChecking=no "${TOMCAT_USER}@${TOMCAT_HOST}" bash -lc "
-              set -euo pipefail
-              sudo rm -f '${TOMCAT_WEBAPPS}/${APP_NAME}.war'
-              sudo rm -rf '${TOMCAT_WEBAPPS}/${APP_NAME}' || true
-              sudo mv '/home/${TOMCAT_USER}/${APP_NAME}.war' '${TOMCAT_WEBAPPS}/'
+        echo "Copying $WAR to ${TOMCAT_HOST} ..."
+        scp -o StrictHostKeyChecking=no "$WAR" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
 
-              if [ -x '${TOMCAT_BIN}/shutdown.sh' ]; then
-                sudo '${TOMCAT_BIN}/shutdown.sh' || true
-                sleep 3
-                sudo '${TOMCAT_BIN}/startup.sh'
-              else
-                sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
-              fi
-            "
+        echo "Restarting Tomcat and deploying WAR ..."
+        ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} bash -lc "
+          set -e
+          sudo rm -rf ${TOMCAT_WEBAPPS}/${APP_NAME} ${TOMCAT_WEBAPPS}/${APP_NAME}.war || true
+          sudo mv /home/${TOMCAT_USER}/${APP_NAME}.war ${TOMCAT_WEBAPPS}/
+          if [ -x ${TOMCAT_BIN}/shutdown.sh ]; then
+            sudo ${TOMCAT_BIN}/shutdown.sh || true
+            sleep 3
+            sudo ${TOMCAT_BIN}/startup.sh
+          else
+            sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
+          fi
+        "
 
-            echo "Health check…"
-            sleep 8
-            curl -fsS \"http://${TOMCAT_HOST}:8080${HEALTH_PATH}\" | head -c 400 || true
-          '''
-        }
-      }
+        echo "Waiting for deploy..."
+        sleep 8
+        curl -fsS "http://${TOMCAT_HOST}:8080${HEALTH_PATH}" | head -c 400 || true
+      '''
     }
+  }
+}
   }
 
   post {
