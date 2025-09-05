@@ -5,22 +5,22 @@ pipeline {
 
   parameters {
     // === Nexus (your EIP) ===
-    string(name: 'NEXUS_HOST', defaultValue: '52.21.103.235', description: 'Nexus host/IP')
-    string(name: 'NEXUS_PORT', defaultValue: '8081', description: 'Nexus port')
-    string(name: 'NEXUS_RELEASES_PATH', defaultValue: 'repository/maven-releases/', description: 'Releases path')
-    string(name: 'NEXUS_SNAPSHOTS_PATH', defaultValue: 'repository/maven-snapshots/', description: 'Snapshots path')
+    string(name: 'NEXUS_HOST',           defaultValue: '52.21.103.235', description: 'Nexus host/IP')
+    string(name: 'NEXUS_PORT',           defaultValue: '8081',          description: 'Nexus port')
+    string(name: 'NEXUS_RELEASES_PATH',  defaultValue: 'repository/maven-releases/',   description: 'Releases path')
+    string(name: 'NEXUS_SNAPSHOTS_PATH', defaultValue: 'repository/maven-snapshots/',  description: 'Snapshots path')
 
     // === SonarQube (your EIP) ===
     string(name: 'SONAR_HOST_URL', defaultValue: 'http://52.72.165.200:9000', description: 'SonarQube URL')
 
     // === Tomcat (optional) ===
     booleanParam(name: 'DEPLOY_TO_TOMCAT', defaultValue: true, description: 'Deploy after Nexus')
-    string(name: 'TOMCAT_HOST', defaultValue: '54.236.97.199', description: 'Tomcat host/IP')  // <-- set to your EIP
-    string(name: 'TOMCAT_USER', defaultValue: 'ubuntu', description: 'SSH user on Tomcat box')
+    string(name: 'TOMCAT_HOST',    defaultValue: '54.236.97.199',                 description: 'Tomcat host/IP')
+    string(name: 'TOMCAT_USER',    defaultValue: 'ubuntu',                        description: 'SSH user on Tomcat box')
     string(name: 'TOMCAT_WEBAPPS', defaultValue: '/opt/apache-tomcat-10.1.44/webapps', description: 'Tomcat webapps dir')
-    string(name: 'TOMCAT_BIN', defaultValue: '/opt/apache-tomcat-10.1.44/bin', description: 'Tomcat bin dir')
-    string(name: 'APP_NAME', defaultValue: 'NumberGuessGame', description: 'WAR base name (no .war)')
-    string(name: 'HEALTH_PATH', defaultValue: '/NumberGuessGame/guess', description: 'Health check path')
+    string(name: 'TOMCAT_BIN',     defaultValue: '/opt/apache-tomcat-10.1.44/bin',     description: 'Tomcat bin dir')
+    string(name: 'APP_NAME',       defaultValue: 'NumberGuessGame',               description: 'WAR base name (no .war)')
+    string(name: 'HEALTH_PATH',    defaultValue: '/NumberGuessGame/guess',        description: 'Health check path')
   }
 
   environment {
@@ -29,13 +29,25 @@ pipeline {
     NEXUS_RELEASES_ID  = 'nexus-releases'
     NEXUS_SNAPSHOTS_ID = 'nexus-snapshots'
 
-    // SonarQube: credential ID must exist in Jenkins as a Secret text
+    // SonarQube: Secret Text credential ID in Jenkins
     SONAR_AUTH_TOKEN = credentials('sonar_token')
   }
 
   stages {
-    stage('Checkout SCM') {
-      steps { checkout scm }
+    stage('Checkout SCM') { steps { checkout scm } }
+
+    stage('Tool Install') { steps { sh 'java -version && mvn -v' } }
+
+    stage('Show branch') {
+      steps {
+        script {
+          env.CURRENT_BRANCH = sh(
+            script: "git rev-parse --abbrev-ref HEAD",
+            returnStdout: true
+          ).trim()
+          echo "Building branch: ${env.CURRENT_BRANCH}"
+        }
+      }
     }
 
     stage('Generate Maven settings.xml') {
@@ -89,17 +101,19 @@ pipeline {
       }
     }
 
+    // ---------- DEPLOYMENTS (single-pipeline friendly branch gating) ----------
     stage('Deploy to Nexus') {
-      when { anyOf { branch 'features/theoDev'; branch 'main'; branch 'master' } }
+      when {
+        expression { return env.CURRENT_BRANCH in ['features/theoDev','main','master'] }
+      }
       steps {
         script {
-          def version   = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version", returnStdout: true).trim()
+          def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version", returnStdout: true).trim()
           def isSnapshot = version.endsWith('-SNAPSHOT')
-          def repoId    = isSnapshot ? env.NEXUS_SNAPSHOTS_ID : env.NEXUS_RELEASES_ID
-          def repoUrl   = isSnapshot ? "${env.NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH}"
-                                     : "${env.NEXUS_BASE}/${params.NEXUS_RELEASES_PATH}"
-          echo "Version: ${version} (snapshot? ${isSnapshot}) → ${repoId}"
-
+          def repoId     = isSnapshot ? env.NEXUS_SNAPSHOTS_ID : env.NEXUS_RELEASES_ID
+          def repoUrl    = isSnapshot ? "${env.NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH}"
+                                      : "${env.NEXUS_BASE}/${params.NEXUS_RELEASES_PATH}"
+          echo "Version: ${version} (snapshot? ${isSnapshot}) → ${repoId} @ ${repoUrl}"
           sh """
             mvn -B -s jenkins-settings.xml -DskipTests deploy \
               -DaltDeploymentRepository=${repoId}::default::${repoUrl}
@@ -109,11 +123,13 @@ pipeline {
     }
 
     stage('Nexus Sanity Check') {
-      when { anyOf { branch 'features/theoDev'; branch 'main'; branch 'master' } }
+      when {
+        expression { return env.CURRENT_BRANCH in ['features/theoDev','main','master'] }
+      }
       steps {
         sh '''
           set -e
-          echo "Checking Nexus availability at ${NEXUS_BASE}"
+          echo "Checking Nexus at ${NEXUS_BASE}"
           curl -fsSI "${NEXUS_BASE}/service/rest/v1/status" > /dev/null
           echo "✅ Nexus is reachable"
         '''
@@ -123,23 +139,23 @@ pipeline {
     stage('Deploy WAR to Tomcat') {
       when {
         allOf {
-          anyOf { branch 'features/theoDev'; branch 'main'; branch 'master' }
+          expression { return env.CURRENT_BRANCH in ['features/theoDev','main','master'] }
           expression { return params.DEPLOY_TO_TOMCAT }
         }
       }
       steps {
         sshagent(credentials: ['tomcat_ssh']) {
-          sh '''
-            set -euo pipefail
-            WAR=$(ls target/*.war | head -n1)
-            [ -f "$WAR" ] || { echo "WAR not found"; exit 1; }
+          sh """
+            set -e
+            WAR=\$(ls target/*.war | head -n1)
+            [ -f \"\$WAR\" ] || { echo 'WAR not found'; exit 1; }
 
-            echo "Copying $WAR to ${TOMCAT_HOST}"
-            scp -o StrictHostKeyChecking=no "$WAR" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
+            echo 'Copying WAR to ${TOMCAT_HOST} ...'
+            scp -o StrictHostKeyChecking=no \"\$WAR\" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
 
-            echo "Restarting Tomcat and deploying WAR ..."
+            echo 'Restarting Tomcat and deploying WAR ...'
             ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} bash -lc '
-              set -euo pipefail
+              set -e
               sudo rm -rf ${TOMCAT_WEBAPPS}/${APP_NAME} ${TOMCAT_WEBAPPS}/${APP_NAME}.war || true
               sudo mv /home/${TOMCAT_USER}/${APP_NAME}.war ${TOMCAT_WEBAPPS}/
               if [ -x ${TOMCAT_BIN}/shutdown.sh ]; then
@@ -150,7 +166,9 @@ pipeline {
                 sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
               fi
             '
-          '''
+
+            echo 'Waiting for deploy...'; sleep 8
+          """
         }
       }
     }
@@ -158,25 +176,25 @@ pipeline {
     stage('Health Check') {
       when {
         allOf {
-          anyOf { branch 'features/theoDev'; branch 'main'; branch 'master' }
+          expression { return env.CURRENT_BRANCH in ['features/theoDev','main','master'] }
           expression { return params.DEPLOY_TO_TOMCAT }
         }
       }
       steps {
-        sh '''
+        sh """
           set -e
-          echo "Checking health at http://${TOMCAT_HOST}:8080${HEALTH_PATH}"
-          for i in {1..12}; do
+          echo 'Checking health at http://${TOMCAT_HOST}:8080${HEALTH_PATH}'
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
             if curl -fsS "http://${TOMCAT_HOST}:8080${HEALTH_PATH}" | head -c 200; then
-              echo "✅ Health check passed"
+              echo '✅ Health check passed'
               exit 0
             fi
-            echo "⏳ App not ready yet... retry $i/12"
+            echo "⏳ App not ready yet... retry \$i/12"
             sleep 5
           done
-          echo "❌ Health check failed after 60s"
+          echo '❌ Health check failed after 60s'
           exit 1
-        '''
+        """
       }
     }
   }
