@@ -198,7 +198,7 @@ stage('Deploy to Tomcat (SSH)') {
         }
       }
     }
-
+  }
     // 👉 ADD THIS RIGHT AFTER
     stage('Health Check') {
       when {
@@ -226,7 +226,6 @@ stage('Deploy to Tomcat (SSH)') {
         '''
       }
     }
-  }
 
   post {
     success { echo '✅ Pipeline finished successfully' }
