@@ -44,7 +44,7 @@ public class NumberGuessServlet extends HttpServlet {
         try {
             int guess = Integer.parseInt(request.getParameter("guess"));
             if (guess < target) {
-                out.println("<h2>Your guess is too low. Try again!</h2>");
+                out.println("<h2>Your guess is too low for this game. Try again!</h2>");
             } else if (guess > target) {
                 out.println("<h2>Your guess is too high. Try again!</h2>");
             } else {
