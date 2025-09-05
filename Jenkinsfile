@@ -4,6 +4,9 @@ pipeline {
   tools { jdk 'Java'; maven 'Maven' }
 
   parameters {
+    // Optional manual override when Jenkins is in detached HEAD
+    string(name: 'BRANCH_OVERRIDE', defaultValue: '', description: 'Override branch name (leave blank normally)')
+
     // === Nexus (your EIP) ===
     string(name: 'NEXUS_HOST',           defaultValue: '52.21.103.235', description: 'Nexus host/IP')
     string(name: 'NEXUS_PORT',           defaultValue: '8081',          description: 'Nexus port')
@@ -38,14 +41,19 @@ pipeline {
 
     stage('Tool Install') { steps { sh 'java -version && mvn -v' } }
 
-    stage('Show branch') {
+    stage('Detect branch') {
       steps {
         script {
-          env.CURRENT_BRANCH = sh(
-            script: "git rev-parse --abbrev-ref HEAD",
+          // 1) try user override; 2) try normal short name; 3) map from remote refs containing HEAD
+          def override = (params.BRANCH_OVERRIDE ?: '').trim()
+          def shortName = sh(script: "git symbolic-ref -q --short HEAD || true", returnStdout: true).trim()
+          def fromRemote = sh(
+            script: "git branch -r --contains HEAD | sed -n 's#^[ *]*origin/##p' | head -n1",
             returnStdout: true
           ).trim()
-          echo "Building branch: ${env.CURRENT_BRANCH}"
+
+          env.CURRENT_BRANCH = override ?: (shortName ?: fromRemote ?: 'unknown')
+          echo "Resolved branch: ${env.CURRENT_BRANCH}"
         }
       }
     }
@@ -68,9 +76,7 @@ pipeline {
     }
 
     stage('Build & Test') {
-      steps {
-        sh 'mvn -B -s jenkins-settings.xml clean verify'
-      }
+      steps { sh 'mvn -B -s jenkins-settings.xml clean verify' }
       post {
         always {
           junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
@@ -94,18 +100,12 @@ pipeline {
     }
 
     stage('Quality Gate') {
-      steps {
-        timeout(time: 10, unit: 'MINUTES') {
-          waitForQualityGate abortPipeline: true
-        }
-      }
+      steps { timeout(time: 10, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } }
     }
 
-    // ---------- DEPLOYMENTS (single-pipeline friendly branch gating) ----------
+    // ---------------- DEPLOYMENT STAGES ----------------
     stage('Deploy to Nexus') {
-      when {
-        expression { return env.CURRENT_BRANCH in ['features/theoDev','main','master'] }
-      }
+      when { expression { return env.CURRENT_BRANCH in ['features/theoDev','main','master'] } }
       steps {
         script {
           def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version", returnStdout: true).trim()
@@ -123,9 +123,7 @@ pipeline {
     }
 
     stage('Nexus Sanity Check') {
-      when {
-        expression { return env.CURRENT_BRANCH in ['features/theoDev','main','master'] }
-      }
+      when { expression { return env.CURRENT_BRANCH in ['features/theoDev','main','master'] } }
       steps {
         sh '''
           set -e
@@ -166,8 +164,6 @@ pipeline {
                 sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
               fi
             '
-
-            echo 'Waiting for deploy...'; sleep 8
           """
         }
       }
