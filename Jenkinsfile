@@ -1,6 +1,6 @@
 pipeline {
   agent any
-  options { timestamps()}
+  options { timestamps() }
   tools { jdk 'Java'; maven 'Maven' }
 
   parameters {
@@ -17,8 +17,8 @@ pipeline {
     booleanParam(name: 'DEPLOY_TO_TOMCAT', defaultValue: true, description: 'Deploy after Nexus')
     string(name: 'TOMCAT_HOST', defaultValue: 'YOUR_TOMCAT_IP', description: 'Tomcat host/IP')
     string(name: 'TOMCAT_USER', defaultValue: 'ubuntu', description: 'SSH user on Tomcat box')
-    string(name: 'TOMCAT_WEBAPPS', defaultValue: '/opt/tomcat/webapps', description: 'Tomcat webapps dir')
-    string(name: 'TOMCAT_BIN', defaultValue: '/opt/tomcat/bin', description: 'Tomcat bin dir')
+    string(name: 'TOMCAT_WEBAPPS', defaultValue: '/opt/apache-tomcat-10.1.44/webapps', description: 'Tomcat webapps dir')
+    string(name: 'TOMCAT_BIN', defaultValue: '/opt/apache-tomcat-10.1.44/bin', description: 'Tomcat bin dir')
     string(name: 'APP_NAME', defaultValue: 'NumberGuessGame', description: 'WAR base name (no .war)')
     string(name: 'HEALTH_PATH', defaultValue: '/NumberGuessGame/guess', description: 'Health check path')
   }
@@ -34,7 +34,7 @@ pipeline {
   }
 
   stages {
-    stage('Checkout') {
+    stage('Checkout SCM') {
       steps { checkout scm }
     }
 
@@ -69,7 +69,6 @@ pipeline {
 
     stage('Static Analysis (SonarQube)') {
       steps {
-        // 'sonarqube' must match the name configured in Manage Jenkins → System → SonarQube servers
         withSonarQubeEnv('sonarqube') {
           sh """
             mvn -B -s jenkins-settings.xml -DskipTests sonar:sonar \
@@ -95,7 +94,6 @@ pipeline {
       when { branch 'features/theoDev' }
       steps {
         script {
-          // safer than exec:exec; no extra plugin needed
           def version = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version", returnStdout: true).trim()
           def isSnapshot = version.endsWith('-SNAPSHOT')
           def repoId  = isSnapshot ? env.NEXUS_SNAPSHOTS_ID : env.NEXUS_RELEASES_ID
