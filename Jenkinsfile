@@ -3,25 +3,25 @@ pipeline {
   options { timestamps() }
   tools { jdk 'Java'; maven 'Maven' }
 
- parameters {
-  // === Nexus (your EIP) ===
-  string(name: 'NEXUS_HOST',           defaultValue: '52.21.103.235', description: 'Nexus host/IP')
-  string(name: 'NEXUS_PORT',           defaultValue: '8081',          description: 'Nexus port')
-  string(name: 'NEXUS_RELEASES_PATH',  defaultValue: 'repository/maven-releases/',  description: 'Releases path')
-  string(name: 'NEXUS_SNAPSHOTS_PATH', defaultValue: 'repository/maven-snapshots/', description: 'Snapshots path')
+  parameters {
+    // === Nexus (your EIP) ===
+    string(name: 'NEXUS_HOST',           defaultValue: '52.21.103.235', description: 'Nexus host/IP')
+    string(name: 'NEXUS_PORT',           defaultValue: '8081',          description: 'Nexus port')
+    string(name: 'NEXUS_RELEASES_PATH',  defaultValue: 'repository/maven-releases/',   description: 'Releases path')
+    string(name: 'NEXUS_SNAPSHOTS_PATH', defaultValue: 'repository/maven-snapshots/',  description: 'Snapshots path')
 
-  // === SonarQube (your EIP) ===
-  string(name: 'SONAR_HOST_URL', defaultValue: 'http://52.72.165.200:9000', description: 'SonarQube URL')
+    // === SonarQube (your EIP) ===
+    string(name: 'SONAR_HOST_URL', defaultValue: 'http://52.72.165.200:9000', description: 'SonarQube URL')
 
-  // === Tomcat (optional) ===
-  booleanParam(name: 'DEPLOY_TO_TOMCAT', defaultValue: true, description: 'Deploy after Nexus')
-  string(name: 'TOMCAT_HOST',    defaultValue: '54.236.97.199',                description: 'Tomcat host/IP') 
-  string(name: 'TOMCAT_USER',    defaultValue: 'ubuntu',                       description: 'SSH user on Tomcat box')
-  string(name: 'TOMCAT_WEBAPPS', defaultValue: '/opt/apache-tomcat-10.1.44/webapps', description: 'Tomcat webapps dir')
-  string(name: 'TOMCAT_BIN',     defaultValue: '/opt/apache-tomcat-10.1.44/bin',     description: 'Tomcat bin dir')
-  string(name: 'APP_NAME',       defaultValue: 'NumberGuessGame',              description: 'WAR base name (no .war)')
-  string(name: 'HEALTH_PATH',    defaultValue: '/NumberGuessGame/guess',       description: 'Health check path')
-}
+    // === Tomcat (optional) ===
+    booleanParam(name: 'DEPLOY_TO_TOMCAT', defaultValue: true, description: 'Deploy after Nexus')
+    string(name: 'TOMCAT_HOST',    defaultValue: 'YOUR_TOMCAT_IP',                       description: 'Tomcat host/IP')
+    string(name: 'TOMCAT_USER',    defaultValue: 'ubuntu',                                description: 'SSH user on Tomcat box')
+    string(name: 'TOMCAT_WEBAPPS', defaultValue: '/opt/apache-tomcat-10.1.44/webapps',    description: 'Tomcat webapps dir')
+    string(name: 'TOMCAT_BIN',     defaultValue: '/opt/apache-tomcat-10.1.44/bin',        description: 'Tomcat bin dir')
+    string(name: 'APP_NAME',       defaultValue: 'NumberGuessGame',                       description: 'WAR base name (no .war)')
+    string(name: 'HEALTH_PATH',    defaultValue: '/NumberGuessGame/guess',                description: 'Health check path')
+  }
 
   environment {
     // Nexus
