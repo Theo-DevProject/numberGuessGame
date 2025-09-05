@@ -7,13 +7,13 @@ pipeline {
         MAVEN_HOME = tool name: 'Maven3', type: 'maven'
 
         // Nexus repo URL
-        NEXUS_REPO = "http://http://18.197.140.193:8081/repository/maven-releases/"
+        NEXUS_REPO = "http://3.67.77.37:8081/nexus/repository/maven-releases/"
 
         // SonarQube server (configured in Jenkins > Manage Jenkins > Configure System)
         SONARQUBE_ENV = "MySonarQube_1"
 
         // Deployment target
-        TOMCAT_HOST = "http://3.121.159.70:8080"
+        TOMCAT_HOST = "http://18.196.94.213:8080"
         TOMCAT_USER = "ec2-user"
         TOMCAT_PATH = "/opt/tomcat-7.0.94/webapps/"
     }
@@ -51,9 +51,10 @@ pipeline {
                 withSonarQubeEnv("${SONARQUBE_ENV}") {
                     sh """
                         ${MAVEN_HOME}/bin/mvn sonar:sonar \
-                          -Dsonar.projectKey=my-java-app \
-                          -Dsonar.host.url=http://3.125.123.230:9000 \
-                          -Dsonar.login=<SONARQUBE_TOKEN>
+                          mvn clean verify sonar:sonar \ine-javaweb \
+                          -Dsonar.projectName='pipeline javaweb' \
+                          -Dsonar.host.url=http://3.77.144.146:9000 \
+                          -Dsonar.token=sqp_f1265b7d3a9f95ab1e6d5788827aea161c4147f4
                     """
                 }
             }
