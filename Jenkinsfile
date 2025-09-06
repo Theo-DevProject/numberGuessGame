@@ -7,7 +7,6 @@ pipeline {
   triggers { githubPush() }
 
   parameters {
-    // (Optional) force a branch name if needed
     string(name: 'BRANCH_OVERRIDE', defaultValue: '', description: 'Manually override branch (normally leave blank)')
 
     // Nexus
@@ -30,7 +29,7 @@ pipeline {
   }
 
   environment {
-    TARGET_BRANCH      = 'main'  // <-- we only deploy from main
+    TARGET_BRANCH      = 'main'  // build/deploy only from main
     NEXUS_BASE         = "http://${params.NEXUS_HOST}:${params.NEXUS_PORT}"
     NEXUS_RELEASES_ID  = 'nexus-releases'
     NEXUS_SNAPSHOTS_ID = 'nexus-snapshots'
@@ -38,25 +37,23 @@ pipeline {
   }
 
   stages {
-    stage('Checkout SCM') { steps { checkout scm } }
 
-    stage('Tool Install') { steps { sh 'java -version && mvn -v' } }
-
-    stage('Resolve branch') {
+    // 🔒 Pin checkout to main regardless of which branch pushed the webhook
+    stage('Checkout SCM') {
       steps {
         script {
-          def override = (params.BRANCH_OVERRIDE ?: '').trim()
-          def guessed  = sh(script: '''
-            set -e
-            # try normal name; if detached, guess from remote
-            git symbolic-ref -q --short HEAD || \
-            git branch -r --contains HEAD | sed -n 's#^[ *]*origin/##p' | head -n1 || echo main
-          ''', returnStdout: true).trim()
-          env.CURRENT_BRANCH = override ?: guessed
-          echo "Branch resolved to: ${env.CURRENT_BRANCH}"
+          // allow manual override if you really need to test another branch once
+          def branchToBuild = (params.BRANCH_OVERRIDE?.trim()) ? params.BRANCH_OVERRIDE.trim() : env.TARGET_BRANCH
+          git branch: branchToBuild,
+              url: 'https://github.com/Theo-DevProject/numberGuessGame.git'
+              // credentialsId: 'YOUR_GITHUB_CREDS_ID'  // uncomment if the repo is private
+          env.CURRENT_BRANCH = branchToBuild
+          echo "Checked out branch: ${env.CURRENT_BRANCH}"
         }
       }
     }
+
+    stage('Tool Install') { steps { sh 'java -version && mvn -v' } }
 
     stage('Generate Maven settings.xml') {
       steps {
