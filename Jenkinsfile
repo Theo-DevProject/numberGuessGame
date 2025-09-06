@@ -37,13 +37,15 @@ pipeline {
   }
 
   stages {
-    // 🔒 Pin checkout to main (or manual override)
+
+    // Pin checkout to main (or BRANCH_OVERRIDE if set)
     stage('Checkout SCM') {
       steps {
         script {
           def branchToBuild = (params.BRANCH_OVERRIDE?.trim()) ? params.BRANCH_OVERRIDE.trim() : env.TARGET_BRANCH
           git branch: branchToBuild,
               url: 'https://github.com/Theo-DevProject/numberGuessGame.git'
+              // credentialsId: 'YOUR_GITHUB_CREDS_ID'  // uncomment if repo is private
           env.CURRENT_BRANCH = branchToBuild
           echo "Checked out branch: ${env.CURRENT_BRANCH}"
         }
@@ -124,7 +126,7 @@ pipeline {
       }
     }
 
-    // --------- CHANGED: deploy WAR downloaded from Nexus ----------
+    // ✅ Download WAR from Nexus correctly (handles timestamped SNAPSHOTs) and deploy to Tomcat
     stage('Deploy WAR to Tomcat (from Nexus)') {
       when {
         allOf {
@@ -133,54 +135,58 @@ pipeline {
         }
       }
       steps {
-        withCredentials([usernamePassword(credentialsId: 'nexus_creds', usernameVariable: 'NUSER', passwordVariable: 'NPASS')]) {
-          sshagent(credentials: ['tomcat_ssh']) {
-            script {
-              // Resolve Maven coordinates
-              def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version", returnStdout: true).trim()
-              def artifactId = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId", returnStdout: true).trim()
-              def groupId    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId", returnStdout: true).trim()
-              def gpath      = groupId.replace('.', '/')
-              def isSnap     = version.endsWith('-SNAPSHOT')
-              def baseRepo   = isSnap ? "${env.NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH}"
-                                      : "${env.NEXUS_BASE}/${params.NEXUS_RELEASES_PATH}"
-              def warName    = "${artifactId}-${version}.war"
-              def warUrl     = "${baseRepo}${gpath}/${artifactId}/${version}/${warName}"
+        sshagent(credentials: ['tomcat_ssh']) {
+          sh '''#!/usr/bin/env bash
+            set -eo pipefail
 
-              echo "Downloading WAR from Nexus: ${warUrl}"
-              sh """
-                set -e
-                curl -fSL -u "${NUSER}:${NPASS}" -o ${env.APP_NAME}.war "${warUrl}"
-                echo "Copying WAR to ${params.TOMCAT_HOST} ..."
-                scp -o StrictHostKeyChecking=no ${env.APP_NAME}.war ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:/home/${params.TOMCAT_USER}/${env.APP_NAME}.war
-              """
+            # Identify artifact from POM (GAV)
+            GID=$(mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId)
+            AID=$(mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId)
+            VER=$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)
+            PACK=war
 
-              // safer remote script (no 'bash -lc' quoting issues)
-              sh """
-                ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} <<'REMOTE'
-                set -e
-                sudo rm -rf ${params.TOMCAT_WEBAPPS}/${env.APP_NAME} ${params.TOMCAT_WEBAPPS}/${env.APP_NAME}.war || true
-                sudo mv /home/${params.TOMCAT_USER}/${env.APP_NAME}.war ${params.TOMCAT_WEBAPPS}/
+            # Choose repo + URL and let Maven resolve the exact file
+            if echo "$VER" | grep -q SNAPSHOT; then
+              REPO_URL="${NEXUS_BASE}/${NEXUS_SNAPSHOTS_PATH%/}"
+              REMOTE_SPEC="${NEXUS_SNAPSHOTS_ID}::default::${REPO_URL}"
+            else
+              REPO_URL="${NEXUS_BASE}/${NEXUS_RELEASES_PATH%/}"
+              REMOTE_SPEC="${NEXUS_RELEASES_ID}::default::${REPO_URL}"
+            fi
 
-                if [ -x ${params.TOMCAT_BIN}/shutdown.sh ]; then
-                  sudo ${params.TOMCAT_BIN}/shutdown.sh || true
-                  sleep 3
-                  sudo ${params.TOMCAT_BIN}/startup.sh
-                else
-                  if systemctl list-unit-files | grep -q '^tomcat\\.service'; then
-                    sudo systemctl restart tomcat || true
-                  elif systemctl list-unit-files | grep -q '^tomcat9\\.service'; then
-                    sudo systemctl restart tomcat9 || true
-                  fi
-                fi
-REMOTE
-              """
-            }
-          }
+            echo "Resolving ${GID}:${AID}:${VER}:${PACK} from ${REPO_URL} ..."
+            mvn -B -s jenkins-settings.xml org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
+              -Dartifact="${GID}:${AID}:${VER}:${PACK}" \
+              -DremoteRepositories="${REMOTE_SPEC}" \
+              -DoutputDirectory=. \
+              -Dtransitive=false
+
+            WAR_FILE=$(ls ${AID}-*.war | head -n1)
+            if [ ! -f "$WAR_FILE" ]; then
+              echo "WAR not found after dependency:copy"; exit 1
+            fi
+            echo "Downloaded WAR: $WAR_FILE"
+
+            echo "Copying $WAR_FILE to ${TOMCAT_HOST} ..."
+            scp -o StrictHostKeyChecking=no "$WAR_FILE" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
+
+            echo "Restarting Tomcat and deploying WAR ..."
+            ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} bash -lc '
+              set -e
+              sudo rm -rf ${TOMCAT_WEBAPPS}/${APP_NAME} ${TOMCAT_WEBAPPS}/${APP_NAME}.war || true
+              sudo mv /home/${TOMCAT_USER}/${APP_NAME}.war ${TOMCAT_WEBAPPS}/
+              if [ -x ${TOMCAT_BIN}/shutdown.sh ]; then
+                sudo ${TOMCAT_BIN}/shutdown.sh || true
+                sleep 3
+                sudo ${TOMCAT_BIN}/startup.sh
+              else
+                sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
+              fi
+            '
+          '''
         }
       }
     }
-    // --------------------------------------------------------------
 
     stage('Health Check') {
       when {
@@ -190,22 +196,53 @@ REMOTE
         }
       }
       steps {
-        sh """
+        sh '''
           set -e
-          echo 'Checking health at http://${TOMCAT_HOST}:8080${HEALTH_PATH}'
-          for i in \$(seq 1 12); do
+          echo "Checking health at http://${TOMCAT_HOST}:8080${HEALTH_PATH}"
+          for i in $(seq 1 12); do
             if curl -fsS "http://${TOMCAT_HOST}:8080${HEALTH_PATH}" | head -c 200; then
-              echo '✅ Health check passed'; exit 0
+              echo "✅ Health check passed"; exit 0
             fi
-            echo "⏳ App not ready yet... retry \$i/12"; sleep 5
+            echo "⏳ App not ready yet... retry $i/12"; sleep 5
           done
-          echo '❌ Health check failed after 60s'; exit 1
-        """
+          echo "❌ Health check failed after 60s"; exit 1
+        '''
       }
     }
   }
 
   post {
+    success {
+      emailext(
+        to: 'tijiebor@gmail.com',
+        subject: "✅ SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+        mimeType: 'text/html',
+        body: """
+          <h2>Build Succeeded</h2>
+          <p><b>Job:</b> ${env.JOB_NAME} #${env.BUILD_NUMBER}</p>
+          <p><b>Branch:</b> ${env.CURRENT_BRANCH}</p>
+          <p><a href="${env.BUILD_URL}">Open build</a></p>
+          <hr/>
+          <p>Test results and SonarQube report are available in the build page.</p>
+        """
+      )
+    }
+    failure {
+      emailext(
+        to: 'tijiebor@gmail.com',
+        subject: "❌ FAILURE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+        mimeType: 'text/html',
+        attachmentsPattern: '**/target/surefire-reports/*.xml',
+        body: """
+          <h2>Build Failed</h2>
+          <p><b>Job:</b> ${env.JOB_NAME} #${env.BUILD_NUMBER}</p>
+          <p><b>Branch:</b> ${env.CURRENT_BRANCH}</p>
+          <p><a href="${env.BUILD_URL}console">Console log</a></p>
+          <hr/>
+          <p>JUnit XML attached (if available).</p>
+        """
+      )
+    }
     always { echo 'Pipeline finished.' }
   }
 }
