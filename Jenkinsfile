@@ -37,16 +37,13 @@ pipeline {
   }
 
   stages {
-
-    // 🔒 Pin checkout to main regardless of which branch pushed the webhook
+    // 🔒 Pin checkout to main (or manual override)
     stage('Checkout SCM') {
       steps {
         script {
-          // allow manual override if you really need to test another branch once
           def branchToBuild = (params.BRANCH_OVERRIDE?.trim()) ? params.BRANCH_OVERRIDE.trim() : env.TARGET_BRANCH
           git branch: branchToBuild,
               url: 'https://github.com/Theo-DevProject/numberGuessGame.git'
-              // credentialsId: 'YOUR_GITHUB_CREDS_ID'  // uncomment if the repo is private
           env.CURRENT_BRANCH = branchToBuild
           echo "Checked out branch: ${env.CURRENT_BRANCH}"
         }
@@ -127,7 +124,8 @@ pipeline {
       }
     }
 
-    stage('Deploy WAR to Tomcat') {
+    // --------- CHANGED: deploy WAR downloaded from Nexus ----------
+    stage('Deploy WAR to Tomcat (from Nexus)') {
       when {
         allOf {
           expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
@@ -135,32 +133,54 @@ pipeline {
         }
       }
       steps {
-        sshagent(credentials: ['tomcat_ssh']) {
-          sh """
-            set -e
-            WAR=\$(ls target/*.war | head -n1)
-            [ -f "\${WAR}" ] || { echo 'WAR not found'; exit 1; }
+        withCredentials([usernamePassword(credentialsId: 'nexus_creds', usernameVariable: 'NUSER', passwordVariable: 'NPASS')]) {
+          sshagent(credentials: ['tomcat_ssh']) {
+            script {
+              // Resolve Maven coordinates
+              def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version", returnStdout: true).trim()
+              def artifactId = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId", returnStdout: true).trim()
+              def groupId    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId", returnStdout: true).trim()
+              def gpath      = groupId.replace('.', '/')
+              def isSnap     = version.endsWith('-SNAPSHOT')
+              def baseRepo   = isSnap ? "${env.NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH}"
+                                      : "${env.NEXUS_BASE}/${params.NEXUS_RELEASES_PATH}"
+              def warName    = "${artifactId}-${version}.war"
+              def warUrl     = "${baseRepo}${gpath}/${artifactId}/${version}/${warName}"
 
-            echo "Copying \${WAR} to ${TOMCAT_HOST} ..."
-            scp -o StrictHostKeyChecking=no "\${WAR}" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
+              echo "Downloading WAR from Nexus: ${warUrl}"
+              sh """
+                set -e
+                curl -fSL -u "${NUSER}:${NPASS}" -o ${env.APP_NAME}.war "${warUrl}"
+                echo "Copying WAR to ${params.TOMCAT_HOST} ..."
+                scp -o StrictHostKeyChecking=no ${env.APP_NAME}.war ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:/home/${params.TOMCAT_USER}/${env.APP_NAME}.war
+              """
 
-            echo "Restarting Tomcat and deploying WAR ..."
-            ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} bash -lc '
-              set -e
-              sudo rm -rf ${TOMCAT_WEBAPPS}/${APP_NAME} ${TOMCAT_WEBAPPS}/${APP_NAME}.war || true
-              sudo mv /home/${TOMCAT_USER}/${APP_NAME}.war ${TOMCAT_WEBAPPS}/
-              if [ -x ${TOMCAT_BIN}/shutdown.sh ]; then
-                sudo ${TOMCAT_BIN}/shutdown.sh || true
-                sleep 3
-                sudo ${TOMCAT_BIN}/startup.sh
-              else
-                sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
-              fi
-            '
-          """
+              // safer remote script (no 'bash -lc' quoting issues)
+              sh """
+                ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} <<'REMOTE'
+                set -e
+                sudo rm -rf ${params.TOMCAT_WEBAPPS}/${env.APP_NAME} ${params.TOMCAT_WEBAPPS}/${env.APP_NAME}.war || true
+                sudo mv /home/${params.TOMCAT_USER}/${env.APP_NAME}.war ${params.TOMCAT_WEBAPPS}/
+
+                if [ -x ${params.TOMCAT_BIN}/shutdown.sh ]; then
+                  sudo ${params.TOMCAT_BIN}/shutdown.sh || true
+                  sleep 3
+                  sudo ${params.TOMCAT_BIN}/startup.sh
+                else
+                  if systemctl list-unit-files | grep -q '^tomcat\\.service'; then
+                    sudo systemctl restart tomcat || true
+                  elif systemctl list-unit-files | grep -q '^tomcat9\\.service'; then
+                    sudo systemctl restart tomcat9 || true
+                  fi
+                fi
+REMOTE
+              """
+            }
+          }
         }
       }
     }
+    // --------------------------------------------------------------
 
     stage('Health Check') {
       when {
