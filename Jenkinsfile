@@ -45,7 +45,6 @@ pipeline {
           def branchToBuild = (params.BRANCH_OVERRIDE?.trim()) ? params.BRANCH_OVERRIDE.trim() : env.TARGET_BRANCH
           git branch: branchToBuild,
               url: 'https://github.com/Theo-DevProject/numberGuessGame.git'
-              // credentialsId: 'YOUR_GITHUB_CREDS_ID'  // uncomment if repo is private
           env.CURRENT_BRANCH = branchToBuild
           echo "Checked out branch: ${env.CURRENT_BRANCH}"
         }
@@ -126,7 +125,7 @@ pipeline {
       }
     }
 
-    // ✅ Download WAR from Nexus correctly (handles timestamped SNAPSHOTs) and deploy to Tomcat
+    // Download WAR from Nexus (supports timestamped SNAPSHOT) and deploy safely to Tomcat
     stage('Deploy WAR to Tomcat (from Nexus)') {
       when {
         allOf {
@@ -136,54 +135,67 @@ pipeline {
       }
       steps {
         sshagent(credentials: ['tomcat_ssh']) {
-          sh '''#!/usr/bin/env bash
+          sh """#!/usr/bin/env bash
             set -eo pipefail
 
-            # Identify artifact from POM (GAV)
-            GID=$(mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId)
-            AID=$(mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId)
-            VER=$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)
+            # Identify artifact (GAV) from the POM we just built
+            GID=\$(mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId)
+            AID=\$(mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId)
+            VER=\$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)
             PACK=war
 
             # Choose repo + URL and let Maven resolve the exact file
-            if echo "$VER" | grep -q SNAPSHOT; then
-              REPO_URL="${NEXUS_BASE}/${NEXUS_SNAPSHOTS_PATH%/}"
-              REMOTE_SPEC="${NEXUS_SNAPSHOTS_ID}::default::${REPO_URL}"
+            if echo "\$VER" | grep -q SNAPSHOT; then
+              REPO_URL="${NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH%/}"
+              REMOTE_SPEC="${NEXUS_SNAPSHOTS_ID}::default::\$REPO_URL"
             else
-              REPO_URL="${NEXUS_BASE}/${NEXUS_RELEASES_PATH%/}"
-              REMOTE_SPEC="${NEXUS_RELEASES_ID}::default::${REPO_URL}"
+              REPO_URL="${NEXUS_BASE}/${params.NEXUS_RELEASES_PATH%/}"
+              REMOTE_SPEC="${NEXUS_RELEASES_ID}::default::\$REPO_URL"
             fi
 
-            echo "Resolving ${GID}:${AID}:${VER}:${PACK} from ${REPO_URL} ..."
+            echo "Resolving \$GID:\$AID:\$VER:\$PACK from \$REPO_URL ..."
             mvn -B -s jenkins-settings.xml org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
-              -Dartifact="${GID}:${AID}:${VER}:${PACK}" \
-              -DremoteRepositories="${REMOTE_SPEC}" \
+              -Dartifact="\$GID:\$AID:\$VER:\$PACK" \
+              -DremoteRepositories="\$REMOTE_SPEC" \
               -DoutputDirectory=. \
               -Dtransitive=false
 
-            WAR_FILE=$(ls ${AID}-*.war | head -n1)
-            if [ ! -f "$WAR_FILE" ]; then
+            WAR_FILE=\$(ls "\$AID"-*.war | head -n1)
+            if [ ! -f "\$WAR_FILE" ]; then
               echo "WAR not found after dependency:copy"; exit 1
             fi
-            echo "Downloaded WAR: $WAR_FILE"
+            echo "Downloaded WAR: \$WAR_FILE"
 
-            echo "Copying $WAR_FILE to ${TOMCAT_HOST} ..."
-            scp -o StrictHostKeyChecking=no "$WAR_FILE" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
+            echo "Copying \$WAR_FILE to ${TOMCAT_HOST} ..."
+            scp -o StrictHostKeyChecking=no "\$WAR_FILE" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
 
             echo "Restarting Tomcat and deploying WAR ..."
-            ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} bash -lc '
-              set -e
-              sudo rm -rf ${TOMCAT_WEBAPPS}/${APP_NAME} ${TOMCAT_WEBAPPS}/${APP_NAME}.war || true
-              sudo mv /home/${TOMCAT_USER}/${APP_NAME}.war ${TOMCAT_WEBAPPS}/
-              if [ -x ${TOMCAT_BIN}/shutdown.sh ]; then
-                sudo ${TOMCAT_BIN}/shutdown.sh || true
+            ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} bash -lc "
+              set -euo pipefail
+              T_WEBAPPS='${TOMCAT_WEBAPPS}'
+              T_BIN='${TOMCAT_BIN}'
+              APP='${APP_NAME}'
+
+              # Safety checks
+              if [ -z \"\$T_WEBAPPS\" ] || [ -z \"\$T_BIN\" ] || [ -z \"\$APP\" ]; then
+                echo 'One or more required vars empty (T_WEBAPPS/T_BIN/APP)'; exit 1
+              fi
+              case \"\$T_WEBAPPS\" in
+                /|/root|'') echo 'Refusing to operate on unsafe webapps path'; exit 1 ;;
+              esac
+
+              sudo rm -rf \"\$T_WEBAPPS/\$APP\" \"\$T_WEBAPPS/\$APP.war\" || true
+              sudo mv /home/${TOMCAT_USER}/${APP_NAME}.war \"\$T_WEBAPPS/\"
+
+              if [ -x \"\$T_BIN/shutdown.sh\" ]; then
+                sudo \"\$T_BIN/shutdown.sh\" || true
                 sleep 3
-                sudo ${TOMCAT_BIN}/startup.sh
+                sudo \"\$T_BIN/startup.sh\"
               else
                 sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
               fi
-            '
-          '''
+            "
+          """
         }
       }
     }
