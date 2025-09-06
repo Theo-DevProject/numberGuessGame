@@ -106,7 +106,8 @@ pipeline {
     }
 
     stage('Deploy to Nexus') {
-      when { expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] } }
+      // when { expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] } }
+      when { expression { return env.CURRENT_BRANCH == 'main' } }
       steps {
         script {
           def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version", returnStdout: true).trim()
@@ -125,7 +126,7 @@ pipeline {
     }
 
     stage('Nexus Sanity Check') {
-      when { expression { return env.CURRENT_BRANCH in ['main','master','features/theoDev'] } }
+      when { expression { return env.CURRENT_BRANCH == 'main' } }
       // when { expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] } }
       steps {
         sh 'curl -fsSI "${NEXUS_BASE}/service/rest/v1/status" > /dev/null && echo "✅ Nexus is reachable"'
@@ -133,12 +134,19 @@ pipeline {
     }
 
     stage('Deploy WAR to Tomcat') {
+
       when {
-        allOf {
-          expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] }
-          expression { return params.DEPLOY_TO_TOMCAT }
-        }
-      }
+          allOf {
+              expression { return env.CURRENT_BRANCH == 'main' }
+              expression { return params.DEPLOY_TO_TOMCAT }
+            }
+          }
+     // when {
+     //   allOf {
+     //     expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] }
+    //    expression { return params.DEPLOY_TO_TOMCAT }
+    //    }
+    //  }
       steps {
         sshagent(credentials: ['tomcat_ssh']) {
           sh """
@@ -168,12 +176,18 @@ pipeline {
     }
 
     stage('Health Check') {
-      when {
-        allOf {
-          expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] }
-          expression { return params.DEPLOY_TO_TOMCAT }
-        }
-      }
+        when {
+             allOf {
+                  expression { return env.CURRENT_BRANCH == 'main' }
+                  expression { return params.DEPLOY_TO_TOMCAT }
+                }
+              }
+      //when {
+      //  allOf {
+      //    expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] }
+      //    expression { return params.DEPLOY_TO_TOMCAT }
+      //  }
+      //}
       steps {
         sh """
           set -e
