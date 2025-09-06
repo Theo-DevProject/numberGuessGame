@@ -3,9 +3,11 @@ pipeline {
   options { timestamps() }
   tools { jdk 'Java'; maven 'Maven' }
 
+  // Auto-build on GitHub push (webhook must point to /github-webhook/)
   triggers { githubPush() }
 
   parameters {
+    // Build branch (optional one-off override)
     string(name: 'BRANCH_OVERRIDE', defaultValue: '', description: 'Manually override branch (normally leave blank)')
 
     // Nexus
@@ -25,22 +27,27 @@ pipeline {
     string(name: 'TOMCAT_BIN',     defaultValue: '/opt/apache-tomcat-10.1.44/bin',     description: 'Tomcat bin dir')
     string(name: 'APP_NAME',       defaultValue: 'NumberGuessGame',               description: 'WAR base name (no .war)')
     string(name: 'HEALTH_PATH',    defaultValue: '/NumberGuessGame/guess',        description: 'Health check path')
+
+    // Email
+    string(name: 'EMAIL_TO', defaultValue: 'tijiebor@gmail.com', description: 'Build notifications recipients (comma separated)')
   }
 
   environment {
-    TARGET_BRANCH      = 'main'
+    TARGET_BRANCH      = 'main'  // build/deploy only from main
     NEXUS_BASE         = "http://${params.NEXUS_HOST}:${params.NEXUS_PORT}"
     NEXUS_RELEASES_ID  = 'nexus-releases'
     NEXUS_SNAPSHOTS_ID = 'nexus-snapshots'
-    SONAR_AUTH_TOKEN   = credentials('sonar_token')
+    SONAR_AUTH_TOKEN   = credentials('sonar_token') // Secret Text in Jenkins
   }
 
   stages {
+    // Pin checkout to main unless overridden
     stage('Checkout SCM') {
       steps {
         script {
           def branchToBuild = (params.BRANCH_OVERRIDE?.trim()) ? params.BRANCH_OVERRIDE.trim() : env.TARGET_BRANCH
-          git branch: branchToBuild, url: 'https://github.com/Theo-DevProject/numberGuessGame.git'
+          git branch: branchToBuild,
+              url: 'https://github.com/Theo-DevProject/numberGuessGame.git'
           env.CURRENT_BRANCH = branchToBuild
           echo "Checked out branch: ${env.CURRENT_BRANCH}"
         }
@@ -106,6 +113,7 @@ pipeline {
           def repoUrl    = isSnapshot ? "${env.NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH}"
                                       : "${env.NEXUS_BASE}/${params.NEXUS_RELEASES_PATH}"
           echo "Version: ${version} (snapshot? ${isSnapshot}) → ${repoId} @ ${repoUrl}"
+
           sh """
             mvn -B -s jenkins-settings.xml -DskipTests deploy \
               -DaltDeploymentRepository=${repoId}::default::${repoUrl}
@@ -130,77 +138,62 @@ pipeline {
       }
       steps {
         script {
-          // Trim trailing slashes in Groovy to avoid Bash parameter expansion
-          def releasesPath  = (params.NEXUS_RELEASES_PATH ?: '').trim().replaceAll('/+$','')
-          def snapshotsPath = (params.NEXUS_SNAPSHOTS_PATH ?: '').trim().replaceAll('/+$','')
+          // Resolve GAV from the POM of this project
+          def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",     returnStdout: true).trim()
+          def artifactId = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId", returnStdout: true).trim()
+          def groupId    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId",    returnStdout: true).trim()
+          def isSnapshot = version.endsWith('-SNAPSHOT')
 
-          withEnv([
-            "RELEASES_PATH=${releasesPath}",
-            "SNAPSHOTS_PATH=${snapshotsPath}"
-          ]) {
-            sshagent(credentials: ['tomcat_ssh']) {
-              sh """#!/usr/bin/env bash
-                set -eo pipefail
+          // Pick the right Nexus repo URL (strip any trailing slash in the path)
+          def releasesPath  = params.NEXUS_RELEASES_PATH.replaceAll('/+$','')
+          def snapshotsPath = params.NEXUS_SNAPSHOTS_PATH.replaceAll('/+$','')
+          def repoUrl       = isSnapshot ? "${env.NEXUS_BASE}/${snapshotsPath}" : "${env.NEXUS_BASE}/${releasesPath}"
 
-                # Resolve GAV from local POM
-                GID=\$(mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId)
-                AID=\$(mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId)
-                VER=\$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)
-                PACK=war
+          echo "Resolving ${groupId}:${artifactId}:${version}:war from ${repoUrl} ..."
+          // Use maven-dependency-plugin to copy the WAR locally from Nexus
+          sh """
+            mvn -B -q org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
+              -DremoteRepositories=nexus::::${repoUrl} \
+              -Dartifact=${groupId}:${artifactId}:${version}:war \
+              -DoutputDirectory=. \
+              -Dtransitive=false
+          """
+          def warName = "${artifactId}-${version}.war"
+          echo "Downloaded WAR: ${warName}"
 
-                # Choose repo + URL and let Maven resolve exact artifact (handles timestamped SNAPSHOT)
-                if echo "\$VER" | grep -q SNAPSHOT; then
-                  REPO_URL="${NEXUS_BASE}/\${SNAPSHOTS_PATH}"
-                  REMOTE_SPEC="${NEXUS_SNAPSHOTS_ID}::default::\$REPO_URL"
-                else
-                  REPO_URL="${NEXUS_BASE}/\${RELEASES_PATH}"
-                  REMOTE_SPEC="${NEXUS_RELEASES_ID}::default::\$REPO_URL"
-                fi
+          // SCP then deploy with safe var handling inside remote shell
+          sh """
+            set -e
+            echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
+            scp -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:/home/${params.TOMCAT_USER}/${params.APP_NAME}.war
 
-                echo "Resolving \$GID:\$AID:\$VER:\$PACK from \$REPO_URL ..."
-                mvn -B -s jenkins-settings.xml org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \\
-                  -Dartifact="\$GID:\$AID:\$VER:\$PACK" \\
-                  -DremoteRepositories="\$REMOTE_SPEC" \\
-                  -DoutputDirectory=. \\
-                  -Dtransitive=false
+            echo "Restarting Tomcat and deploying WAR ..."
+            ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} \"\"\"
+              set -euo pipefail
+              T_WEBAPPS='${params.TOMCAT_WEBAPPS}'
+              T_BIN='${params.TOMCAT_BIN}'
+              APP='${params.APP_NAME}'
 
-                WAR_FILE=\$(ls "\$AID"-*.war | head -n1)
-                if [ ! -f "\$WAR_FILE" ]; then
-                  echo "WAR not found after dependency:copy"; exit 1
-                fi
-                echo "Downloaded WAR: \$WAR_FILE"
+              if [ -z "\\\$T_WEBAPPS" ] || [ -z "\\\$T_BIN" ] || [ -z "\\\$APP" ]; then
+                echo 'One or more required vars empty (T_WEBAPPS/T_BIN/APP)'
+                exit 1
+              fi
+              case "\\\$T_WEBAPPS" in
+                /|/root|'') echo 'Refusing to operate on unsafe webapps path'; exit 1 ;;
+              esac
 
-                echo "Copying \$WAR_FILE to ${TOMCAT_HOST} ..."
-                scp -o StrictHostKeyChecking=no "\$WAR_FILE" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
+              sudo rm -rf "\\\$T_WEBAPPS/\\\$APP" "\\\$T_WEBAPPS/\\\$APP.war" || true
+              sudo mv /home/${params.TOMCAT_USER}/${params.APP_NAME}.war "\\\$T_WEBAPPS/"
 
-                echo "Restarting Tomcat and deploying WAR ..."
-                ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} bash -lc "
-                  set -euo pipefail
-                  T_WEBAPPS='${TOMCAT_WEBAPPS}'
-                  T_BIN='${TOMCAT_BIN}'
-                  APP='${APP_NAME}'
-
-                  if [ -z \"\$T_WEBAPPS\" ] || [ -z \"\$T_BIN\" ] || [ -z \"\$APP\" ]; then
-                    echo 'One or more required vars empty (T_WEBAPPS/T_BIN/APP)'; exit 1
-                  fi
-                  case \"\$T_WEBAPPS\" in
-                    /|/root|'') echo 'Refusing to operate on unsafe webapps path'; exit 1 ;;
-                  esac
-
-                  sudo rm -rf \"\$T_WEBAPPS/\$APP\" \"\$T_WEBAPPS/\$APP.war\" || true
-                  sudo mv /home/${TOMCAT_USER}/${APP_NAME}.war \"\$T_WEBAPPS/\"
-
-                  if [ -x \"\$T_BIN/shutdown.sh\" ]; then
-                    sudo \"\$T_BIN/shutdown.sh\" || true
-                    sleep 3
-                    sudo \"\$T_BIN/startup.sh\"
-                  else
-                    sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
-                  fi
-                "
-              """
-            }
-          }
+              if [ -x "\\\$T_BIN/shutdown.sh" ]; then
+                sudo "\\\$T_BIN/shutdown.sh" || true
+                sleep 3
+                sudo "\\\$T_BIN/startup.sh"
+              else
+                sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
+              fi
+            \"\"\"
+          """
         }
       }
     }
@@ -213,49 +206,46 @@ pipeline {
         }
       }
       steps {
-        sh '''
+        sh """
           set -e
-          echo "Checking health at http://${TOMCAT_HOST}:8080${HEALTH_PATH}"
-          for i in $(seq 1 12); do
+          echo 'Checking health at http://${TOMCAT_HOST}:8080${HEALTH_PATH}'
+          for i in \$(seq 1 12); do
             if curl -fsS "http://${TOMCAT_HOST}:8080${HEALTH_PATH}" | head -c 200; then
-              echo "✅ Health check passed"; exit 0
+              echo '✅ Health check passed'; exit 0
             fi
-            echo "⏳ App not ready yet... retry $i/12"; sleep 5
+            echo "⏳ App not ready yet... retry \$i/12"; sleep 5
           done
-          echo "❌ Health check failed after 60s"; exit 1
-        '''
+          echo '❌ Health check failed after 60s'; exit 1
+        """
       }
     }
   }
 
   post {
+    always  { echo 'Pipeline finished.' }
+
     success {
       emailext(
-        to: 'tijiebor@gmail.com',
-        subject: "✅ SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-        mimeType: 'text/html',
-        body: """
-          <h2>Build Succeeded</h2>
-          <p><b>Job:</b> ${env.JOB_NAME} #${env.BUILD_NUMBER}</p>
-          <p><b>Branch:</b> ${env.CURRENT_BRANCH}</p>
-          <p><a href="${env.BUILD_URL}">Open build</a></p>
-        """
+        subject: "[SUCCESS] ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+        to: params.EMAIL_TO,
+        body: """<p>✅ Build succeeded.</p>
+                 <p>Job: ${env.JOB_NAME} #${env.BUILD_NUMBER}</p>
+                 <p>Branch: ${env.CURRENT_BRANCH}</p>
+                 <p>URL: ${env.BUILD_URL}</p>""",
+        mimeType: 'text/html'
       )
     }
+
     failure {
       emailext(
-        to: 'tijiebor@gmail.com',
-        subject: "❌ FAILURE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-        mimeType: 'text/html',
-        attachmentsPattern: '**/target/surefire-reports/*.xml',
-        body: """
-          <h2>Build Failed</h2>
-          <p><b>Job:</b> ${env.JOB_NAME} #${env.BUILD_NUMBER}</p>
-          <p><b>Branch:</b> ${env.CURRENT_BRANCH}</p>
-          <p><a href="${env.BUILD_URL}console">Console log</a></p>
-        """
+        subject: "[FAILED] ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+        to: params.EMAIL_TO,
+        body: """<p>❌ Build failed.</p>
+                 <p>Job: ${env.JOB_NAME} #${env.BUILD_NUMBER}</p>
+                 <p>Branch: ${env.CURRENT_BRANCH}</p>
+                 <p>URL: ${env.BUILD_URL}</p>""",
+        mimeType: 'text/html'
       )
     }
-    always { echo 'Pipeline finished.' }
   }
 }
