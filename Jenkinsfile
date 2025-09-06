@@ -3,18 +3,18 @@ pipeline {
   options { timestamps() }
   tools { jdk 'Java'; maven 'Maven' }
 
-  // Auto-build when GitHub sends a push webhook
+  // Auto-build on GitHub push (webhook must point to /github-webhook/)
   triggers { githubPush() }
 
   parameters {
-    // Optional manual override (normally leave blank)
-    string(name: 'BRANCH_OVERRIDE', defaultValue: '', description: 'Override branch name if Jenkins can’t detect it')
+    // (Optional) force a branch name if needed
+    string(name: 'BRANCH_OVERRIDE', defaultValue: '', description: 'Manually override branch (normally leave blank)')
 
     // Nexus
     string(name: 'NEXUS_HOST',           defaultValue: '52.21.103.235', description: 'Nexus host/IP')
     string(name: 'NEXUS_PORT',           defaultValue: '8081',          description: 'Nexus port')
-    string(name: 'NEXUS_RELEASES_PATH',  defaultValue: 'repository/maven-releases/',   description: 'Releases path')
-    string(name: 'NEXUS_SNAPSHOTS_PATH', defaultValue: 'repository/maven-snapshots/',  description: 'Snapshots path')
+    string(name: 'NEXUS_RELEASES_PATH',  defaultValue: 'repository/maven-releases/',  description: 'Releases path')
+    string(name: 'NEXUS_SNAPSHOTS_PATH', defaultValue: 'repository/maven-snapshots/', description: 'Snapshots path')
 
     // SonarQube
     string(name: 'SONAR_HOST_URL', defaultValue: 'http://52.72.165.200:9000', description: 'SonarQube URL')
@@ -30,13 +30,11 @@ pipeline {
   }
 
   environment {
-    // Nexus
+    TARGET_BRANCH      = 'main'  // <-- we only deploy from main
     NEXUS_BASE         = "http://${params.NEXUS_HOST}:${params.NEXUS_PORT}"
     NEXUS_RELEASES_ID  = 'nexus-releases'
     NEXUS_SNAPSHOTS_ID = 'nexus-snapshots'
-
-    // SonarQube token stored as a Secret Text credential in Jenkins
-    SONAR_AUTH_TOKEN   = credentials('sonar_token')
+    SONAR_AUTH_TOKEN   = credentials('sonar_token') // Secret Text in Jenkins
   }
 
   stages {
@@ -44,15 +42,18 @@ pipeline {
 
     stage('Tool Install') { steps { sh 'java -version && mvn -v' } }
 
-    stage('Detect branch') {
+    stage('Resolve branch') {
       steps {
         script {
           def override = (params.BRANCH_OVERRIDE ?: '').trim()
-          def shortRef  = sh(script: "git symbolic-ref -q --short HEAD || true", returnStdout: true).trim()
-          def fromNote  = sh(script: "git name-rev --name-only HEAD | sed 's#^remotes/origin/##' || true", returnStdout: true).trim()
-          def fromList  = sh(script: "git branch -r --contains HEAD | sed -n 's#^[ *]*origin/##p' | head -n1 || true", returnStdout: true).trim()
-          env.CURRENT_BRANCH = override ?: (shortRef ?: (fromNote ?: (fromList ?: 'unknown')))
-          echo "Resolved branch: ${env.CURRENT_BRANCH}"
+          def guessed  = sh(script: '''
+            set -e
+            # try normal name; if detached, guess from remote
+            git symbolic-ref -q --short HEAD || \
+            git branch -r --contains HEAD | sed -n 's#^[ *]*origin/##p' | head -n1 || echo main
+          ''', returnStdout: true).trim()
+          env.CURRENT_BRANCH = override ?: guessed
+          echo "Branch resolved to: ${env.CURRENT_BRANCH}"
         }
       }
     }
@@ -74,14 +75,13 @@ pipeline {
       }
     }
 
-    stage('Build, Test') {
+    stage('Build & Test') {
       steps {
         sh 'mvn -B -s jenkins-settings.xml clean verify'
       }
       post {
         always {
           junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
-          // Archive WAR and (optionally) JaCoCo XML if your POM generates it
           archiveArtifacts artifacts: 'target/*.war, target/site/jacoco/*.xml', allowEmptyArchive: true, fingerprint: true
         }
       }
@@ -106,8 +106,7 @@ pipeline {
     }
 
     stage('Deploy to Nexus') {
-      // when { expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] } }
-      when { expression { return env.CURRENT_BRANCH == 'main' } }
+      when { expression { env.CURRENT_BRANCH == env.TARGET_BRANCH } }
       steps {
         script {
           def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version", returnStdout: true).trim()
@@ -116,7 +115,6 @@ pipeline {
           def repoUrl    = isSnapshot ? "${env.NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH}"
                                       : "${env.NEXUS_BASE}/${params.NEXUS_RELEASES_PATH}"
           echo "Version: ${version} (snapshot? ${isSnapshot}) → ${repoId} @ ${repoUrl}"
-
           sh """
             mvn -B -s jenkins-settings.xml -DskipTests deploy \
               -DaltDeploymentRepository=${repoId}::default::${repoUrl}
@@ -126,27 +124,19 @@ pipeline {
     }
 
     stage('Nexus Sanity Check') {
-      when { expression { return env.CURRENT_BRANCH == 'main' } }
-      // when { expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] } }
+      when { expression { env.CURRENT_BRANCH == env.TARGET_BRANCH } }
       steps {
         sh 'curl -fsSI "${NEXUS_BASE}/service/rest/v1/status" > /dev/null && echo "✅ Nexus is reachable"'
       }
     }
 
     stage('Deploy WAR to Tomcat') {
-
       when {
-          allOf {
-              expression { return env.CURRENT_BRANCH == 'main' }
-              expression { return params.DEPLOY_TO_TOMCAT }
-            }
-          }
-     // when {
-     //   allOf {
-     //     expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] }
-    //    expression { return params.DEPLOY_TO_TOMCAT }
-    //    }
-    //  }
+        allOf {
+          expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
+          expression { params.DEPLOY_TO_TOMCAT }
+        }
+      }
       steps {
         sshagent(credentials: ['tomcat_ssh']) {
           sh """
@@ -176,18 +166,12 @@ pipeline {
     }
 
     stage('Health Check') {
-        when {
-             allOf {
-                  expression { return env.CURRENT_BRANCH == 'main' }
-                  expression { return params.DEPLOY_TO_TOMCAT }
-                }
-              }
-      //when {
-      //  allOf {
-      //    expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] }
-      //    expression { return params.DEPLOY_TO_TOMCAT }
-      //  }
-      //}
+      when {
+        allOf {
+          expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
+          expression { params.DEPLOY_TO_TOMCAT }
+        }
+      }
       steps {
         sh """
           set -e
