@@ -125,7 +125,8 @@ pipeline {
     }
 
     stage('Nexus Sanity Check') {
-      when { expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] } }
+      when { expression { return env.CURRENT_BRANCH in ['main','master','features/theoDev'] } }
+      // when { expression { return env.CURRENT_BRANCH in ['features/theoDev', 'main', 'master'] } }
       steps {
         sh 'curl -fsSI "${NEXUS_BASE}/service/rest/v1/status" > /dev/null && echo "✅ Nexus is reachable"'
       }
