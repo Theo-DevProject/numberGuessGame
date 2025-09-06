@@ -3,7 +3,6 @@ pipeline {
   options { timestamps() }
   tools { jdk 'Java'; maven 'Maven' }
 
-  // Auto-build on GitHub push (webhook must point to /github-webhook/)
   triggers { githubPush() }
 
   parameters {
@@ -29,22 +28,19 @@ pipeline {
   }
 
   environment {
-    TARGET_BRANCH      = 'main'  // build/deploy only from main
+    TARGET_BRANCH      = 'main'
     NEXUS_BASE         = "http://${params.NEXUS_HOST}:${params.NEXUS_PORT}"
     NEXUS_RELEASES_ID  = 'nexus-releases'
     NEXUS_SNAPSHOTS_ID = 'nexus-snapshots'
-    SONAR_AUTH_TOKEN   = credentials('sonar_token') // Secret Text in Jenkins
+    SONAR_AUTH_TOKEN   = credentials('sonar_token')
   }
 
   stages {
-
-    // Pin checkout to main (or BRANCH_OVERRIDE if set)
     stage('Checkout SCM') {
       steps {
         script {
           def branchToBuild = (params.BRANCH_OVERRIDE?.trim()) ? params.BRANCH_OVERRIDE.trim() : env.TARGET_BRANCH
-          git branch: branchToBuild,
-              url: 'https://github.com/Theo-DevProject/numberGuessGame.git'
+          git branch: branchToBuild, url: 'https://github.com/Theo-DevProject/numberGuessGame.git'
           env.CURRENT_BRANCH = branchToBuild
           echo "Checked out branch: ${env.CURRENT_BRANCH}"
         }
@@ -125,7 +121,6 @@ pipeline {
       }
     }
 
-    // Download WAR from Nexus (supports timestamped SNAPSHOT) and deploy safely to Tomcat
     stage('Deploy WAR to Tomcat (from Nexus)') {
       when {
         allOf {
@@ -134,68 +129,78 @@ pipeline {
         }
       }
       steps {
-        sshagent(credentials: ['tomcat_ssh']) {
-          sh """#!/usr/bin/env bash
-            set -eo pipefail
+        script {
+          // Trim trailing slashes in Groovy to avoid Bash parameter expansion
+          def releasesPath  = (params.NEXUS_RELEASES_PATH ?: '').trim().replaceAll('/+$','')
+          def snapshotsPath = (params.NEXUS_SNAPSHOTS_PATH ?: '').trim().replaceAll('/+$','')
 
-            # Identify artifact (GAV) from the POM we just built
-            GID=\$(mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId)
-            AID=\$(mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId)
-            VER=\$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)
-            PACK=war
+          withEnv([
+            "RELEASES_PATH=${releasesPath}",
+            "SNAPSHOTS_PATH=${snapshotsPath}"
+          ]) {
+            sshagent(credentials: ['tomcat_ssh']) {
+              sh """#!/usr/bin/env bash
+                set -eo pipefail
 
-            # Choose repo + URL and let Maven resolve the exact file
-            if echo "\$VER" | grep -q SNAPSHOT; then
-              REPO_URL="${NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH%/}"
-              REMOTE_SPEC="${NEXUS_SNAPSHOTS_ID}::default::\$REPO_URL"
-            else
-              REPO_URL="${NEXUS_BASE}/${params.NEXUS_RELEASES_PATH%/}"
-              REMOTE_SPEC="${NEXUS_RELEASES_ID}::default::\$REPO_URL"
-            fi
+                # Resolve GAV from local POM
+                GID=\$(mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId)
+                AID=\$(mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId)
+                VER=\$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)
+                PACK=war
 
-            echo "Resolving \$GID:\$AID:\$VER:\$PACK from \$REPO_URL ..."
-            mvn -B -s jenkins-settings.xml org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
-              -Dartifact="\$GID:\$AID:\$VER:\$PACK" \
-              -DremoteRepositories="\$REMOTE_SPEC" \
-              -DoutputDirectory=. \
-              -Dtransitive=false
+                # Choose repo + URL and let Maven resolve exact artifact (handles timestamped SNAPSHOT)
+                if echo "\$VER" | grep -q SNAPSHOT; then
+                  REPO_URL="${NEXUS_BASE}/\${SNAPSHOTS_PATH}"
+                  REMOTE_SPEC="${NEXUS_SNAPSHOTS_ID}::default::\$REPO_URL"
+                else
+                  REPO_URL="${NEXUS_BASE}/\${RELEASES_PATH}"
+                  REMOTE_SPEC="${NEXUS_RELEASES_ID}::default::\$REPO_URL"
+                fi
 
-            WAR_FILE=\$(ls "\$AID"-*.war | head -n1)
-            if [ ! -f "\$WAR_FILE" ]; then
-              echo "WAR not found after dependency:copy"; exit 1
-            fi
-            echo "Downloaded WAR: \$WAR_FILE"
+                echo "Resolving \$GID:\$AID:\$VER:\$PACK from \$REPO_URL ..."
+                mvn -B -s jenkins-settings.xml org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \\
+                  -Dartifact="\$GID:\$AID:\$VER:\$PACK" \\
+                  -DremoteRepositories="\$REMOTE_SPEC" \\
+                  -DoutputDirectory=. \\
+                  -Dtransitive=false
 
-            echo "Copying \$WAR_FILE to ${TOMCAT_HOST} ..."
-            scp -o StrictHostKeyChecking=no "\$WAR_FILE" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
+                WAR_FILE=\$(ls "\$AID"-*.war | head -n1)
+                if [ ! -f "\$WAR_FILE" ]; then
+                  echo "WAR not found after dependency:copy"; exit 1
+                fi
+                echo "Downloaded WAR: \$WAR_FILE"
 
-            echo "Restarting Tomcat and deploying WAR ..."
-            ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} bash -lc "
-              set -euo pipefail
-              T_WEBAPPS='${TOMCAT_WEBAPPS}'
-              T_BIN='${TOMCAT_BIN}'
-              APP='${APP_NAME}'
+                echo "Copying \$WAR_FILE to ${TOMCAT_HOST} ..."
+                scp -o StrictHostKeyChecking=no "\$WAR_FILE" ${TOMCAT_USER}@${TOMCAT_HOST}:/home/${TOMCAT_USER}/${APP_NAME}.war
 
-              # Safety checks
-              if [ -z \"\$T_WEBAPPS\" ] || [ -z \"\$T_BIN\" ] || [ -z \"\$APP\" ]; then
-                echo 'One or more required vars empty (T_WEBAPPS/T_BIN/APP)'; exit 1
-              fi
-              case \"\$T_WEBAPPS\" in
-                /|/root|'') echo 'Refusing to operate on unsafe webapps path'; exit 1 ;;
-              esac
+                echo "Restarting Tomcat and deploying WAR ..."
+                ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} bash -lc "
+                  set -euo pipefail
+                  T_WEBAPPS='${TOMCAT_WEBAPPS}'
+                  T_BIN='${TOMCAT_BIN}'
+                  APP='${APP_NAME}'
 
-              sudo rm -rf \"\$T_WEBAPPS/\$APP\" \"\$T_WEBAPPS/\$APP.war\" || true
-              sudo mv /home/${TOMCAT_USER}/${APP_NAME}.war \"\$T_WEBAPPS/\"
+                  if [ -z \"\$T_WEBAPPS\" ] || [ -z \"\$T_BIN\" ] || [ -z \"\$APP\" ]; then
+                    echo 'One or more required vars empty (T_WEBAPPS/T_BIN/APP)'; exit 1
+                  fi
+                  case \"\$T_WEBAPPS\" in
+                    /|/root|'') echo 'Refusing to operate on unsafe webapps path'; exit 1 ;;
+                  esac
 
-              if [ -x \"\$T_BIN/shutdown.sh\" ]; then
-                sudo \"\$T_BIN/shutdown.sh\" || true
-                sleep 3
-                sudo \"\$T_BIN/startup.sh\"
-              else
-                sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
-              fi
-            "
-          """
+                  sudo rm -rf \"\$T_WEBAPPS/\$APP\" \"\$T_WEBAPPS/\$APP.war\" || true
+                  sudo mv /home/${TOMCAT_USER}/${APP_NAME}.war \"\$T_WEBAPPS/\"
+
+                  if [ -x \"\$T_BIN/shutdown.sh\" ]; then
+                    sudo \"\$T_BIN/shutdown.sh\" || true
+                    sleep 3
+                    sudo \"\$T_BIN/startup.sh\"
+                  else
+                    sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
+                  fi
+                "
+              """
+            }
+          }
         }
       }
     }
@@ -234,8 +239,6 @@ pipeline {
           <p><b>Job:</b> ${env.JOB_NAME} #${env.BUILD_NUMBER}</p>
           <p><b>Branch:</b> ${env.CURRENT_BRANCH}</p>
           <p><a href="${env.BUILD_URL}">Open build</a></p>
-          <hr/>
-          <p>Test results and SonarQube report are available in the build page.</p>
         """
       )
     }
@@ -250,8 +253,6 @@ pipeline {
           <p><b>Job:</b> ${env.JOB_NAME} #${env.BUILD_NUMBER}</p>
           <p><b>Branch:</b> ${env.CURRENT_BRANCH}</p>
           <p><a href="${env.BUILD_URL}console">Console log</a></p>
-          <hr/>
-          <p>JUnit XML attached (if available).</p>
         """
       )
     }
