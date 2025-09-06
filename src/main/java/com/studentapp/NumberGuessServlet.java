@@ -48,7 +48,7 @@ public class NumberGuessServlet extends HttpServlet {
             } else if (guess > target) {
                 out.println("<h2>Your guess is too high for this game. Try again!</h2>");
             } else {
-                out.println("<h2>Congratulations! You guessed the number!</h2>");
+                out.println("<h2>Congratulations! You guessed the number, thank you!</h2>");
                 // reset for a new round
                 session.setAttribute("target", new Random().nextInt(100) + 1);
             }
