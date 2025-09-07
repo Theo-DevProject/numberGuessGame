@@ -100,14 +100,18 @@ pipeline {
     }
 
     stage('Quality Gate') {
-      steps { timeout(time: 10, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } }
+      steps {
+        timeout(time: 10, unit: 'MINUTES') {
+          waitForQualityGate abortPipeline: true
+        }
+      }
     }
 
     stage('Deploy to Nexus') {
       when { expression { env.CURRENT_BRANCH == env.TARGET_BRANCH } }
       steps {
         script {
-          def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version", returnStdout: true).trim()
+          def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",     returnStdout: true).trim()
           def isSnapshot = version.endsWith('-SNAPSHOT')
           def repoId     = isSnapshot ? env.NEXUS_SNAPSHOTS_ID : env.NEXUS_RELEASES_ID
           def repoUrl    = isSnapshot ? "${env.NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH}"
@@ -129,92 +133,74 @@ pipeline {
       }
     }
 
-    // --- NEW: prove SSH key works before deploy
-    stage('Preflight SSH to Tomcat') {
-      when { expression { env.CURRENT_BRANCH == env.TARGET_BRANCH && params.DEPLOY_TO_TOMCAT } }
+    stage('Deploy WAR to Tomcat (from Nexus)') {
+      when {
+        allOf {
+          expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
+          expression { params.DEPLOY_TO_TOMCAT }
+        }
+      }
       steps {
         sshagent(credentials: ['tomcat_ssh']) {
-          sh 'ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} "echo SSH_OK && whoami && hostname"'
+          script {
+            // Resolve GAV from the POM of this project
+            def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",     returnStdout: true).trim()
+            def artifactId = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId", returnStdout: true).trim()
+            def groupId    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId",    returnStdout: true).trim()
+            def isSnapshot = version.endsWith('-SNAPSHOT')
+
+            // Pick the right Nexus repo URL (strip any trailing slash in the path)
+            def releasesPath  = params.NEXUS_RELEASES_PATH.replaceAll('/+$','')
+            def snapshotsPath = params.NEXUS_SNAPSHOTS_PATH.replaceAll('/+$','')
+            def repoUrl       = isSnapshot ? "${env.NEXUS_BASE}/${snapshotsPath}" : "${env.NEXUS_BASE}/${releasesPath}"
+
+            echo "Resolving ${groupId}:${artifactId}:${version}:war from ${repoUrl} ..."
+            // Use maven-dependency-plugin to copy the WAR locally from Nexus
+            sh """
+              mvn -B -q org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
+                -DremoteRepositories=nexus::::${repoUrl} \
+                -Dartifact=${groupId}:${artifactId}:${version}:war \
+                -DoutputDirectory=. \
+                -Dtransitive=false
+            """
+            def warName   = "${artifactId}-${version}.war"
+            def remoteWar = "/home/${params.TOMCAT_USER}/" + params.APP_NAME + ".war"
+            echo "Downloaded WAR: ${warName}"
+
+            // SCP then deploy with safe var handling inside remote shell
+            sh """
+              set -e
+
+              echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
+              scp -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:"${remoteWar}"
+
+              echo "Restarting Tomcat and deploying WAR ..."
+              ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} \\
+                T_WEBAPPS='${params.TOMCAT_WEBAPPS}' \\
+                T_BIN='${params.TOMCAT_BIN}' \\
+                APP='${params.APP_NAME}' \\
+                /bin/bash -lc '
+                  set -euo pipefail
+
+                  [ -n "\\$T_WEBAPPS" ] && [ -n "\\$T_BIN" ] && [ -n "\\$APP" ] || { echo "One or more required vars empty (T_WEBAPPS/T_BIN/APP)"; exit 1; }
+                  case "\\$T_WEBAPPS" in /|/root|"") echo "Refusing to operate on unsafe webapps path: \\$T_WEBAPPS"; exit 1 ;; esac
+
+                  sudo rm -rf "\\$T_WEBAPPS/\\$APP" "\\$T_WEBAPPS/\\$APP.war" || true
+                  sudo mv "${remoteWar}" "\\$T_WEBAPPS/"
+
+                  if [ -x "\\$T_BIN/shutdown.sh" ]; then
+                    sudo "\\$T_BIN/shutdown.sh" || true
+                    sleep 3
+                    sudo "\\$T_BIN/startup.sh"
+                  else
+                    sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
+                  fi
+                '
+            """
+          }
         }
       }
     }
-
-  stage('Deploy WAR to Tomcat (from Nexus)') {
-  when {
-    allOf {
-      expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
-      expression { params.DEPLOY_TO_TOMCAT }
-    }
-  }
-  steps {
-    sshagent(credentials: ['tomcat_ssh']) {
-      script {
-        // ---- Resolve artifact coordinates from this repo's POM
-        def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",     returnStdout: true).trim()
-        def artifactId = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId", returnStdout: true).trim()
-        def groupId    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId",    returnStdout: true).trim()
-        def isSnapshot = version.endsWith('-SNAPSHOT')
-
-        // ---- Nexus repo (strip trailing slashes in paths)
-        def releasesPath  = params.NEXUS_RELEASES_PATH.replaceAll('/+$','')
-        def snapshotsPath = params.NEXUS_SNAPSHOTS_PATH.replaceAll('/+$','')
-        def repoUrl       = isSnapshot ? "${env.NEXUS_BASE}/${snapshotsPath}" : "${env.NEXUS_BASE}/${releasesPath}"
-
-        echo "Resolving ${groupId}:${artifactId}:${version}:war from ${repoUrl} ..."
-        sh """
-          mvn -B -q org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
-            -DremoteRepositories=nexus::::${repoUrl} \
-            -Dartifact=${groupId}:${artifactId}:${version}:war \
-            -DoutputDirectory=. \
-            -Dtransitive=false
-        """
-        def warName = "${artifactId}-${version}.war"
-        echo "Downloaded WAR: ${warName}"
-
-        // ---- Materialize remote values on the Jenkins side
-        def T_WEBAPPS = params.TOMCAT_WEBAPPS?.trim() ?: ''
-        def T_BIN     = params.TOMCAT_BIN?.trim()     ?: ''
-        def APP       = params.APP_NAME?.trim()       ?: ''
-        if (!T_WEBAPPS || !T_BIN || !APP) {
-          error "Required parameters empty (TOMCAT_WEBAPPS='${T_WEBAPPS}', TOMCAT_BIN='${T_BIN}', APP_NAME='${APP}')"
-        }
-
-        // ---- Copy & deploy (values injected explicitly; escape $ for Groovy)
-        sh """
-          set -e
-
-          echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
-          scp -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:/home/${params.TOMCAT_USER}/${APP}.war
-
-          echo "Restarting Tomcat and deploying WAR ..."
-          ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} /bin/bash -lc '
-            set -euo pipefail
-            T_WEBAPPS="${T_WEBAPPS}"
-            T_BIN="${T_BIN}"
-            APP="${APP}"
-
-            # Safety checks
-            [ -n "\\$T_WEBAPPS" ] && [ -n "\\$T_BIN" ] && [ -n "\\$APP" ] || { echo "One or more required vars empty (T_WEBAPPS/T_BIN/APP)"; exit 1; }
-            case "\\$T_WEBAPPS" in /|/root|"") echo "Refusing to operate on unsafe webapps path: \\$T_WEBAPPS"; exit 1 ;; esac
-
-            # Deploy
-            sudo rm -rf "\\$T_WEBAPPS/\\$APP" "\\$T_WEBAPPS/\\$APP.war" || true
-            sudo mv "/home/${params.TOMCAT_USER}/\\${APP}.war" "\\$T_WEBAPPS/"
-
-            # Restart Tomcat
-            if [ -x "\\$T_BIN/shutdown.sh" ]; then
-              sudo "\\$T_BIN/shutdown.sh" || true
-              sleep 3
-              sudo "\\$T_BIN/startup.sh"
-            else
-              sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
-            fi
-          '
-        """
-      }
-    }
-  }
-}
 
     stage('Health Check') {
       when {
