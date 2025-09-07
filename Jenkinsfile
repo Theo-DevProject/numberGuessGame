@@ -133,23 +133,23 @@ pipeline {
       }
     }
 
-  stage('Deploy WAR to Tomcat (from Nexus)') {
-   when {
-     allOf {
-      expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
-      expression { params.DEPLOY_TO_TOMCAT }
-    }
-  }
-  steps {
+ stage('Deploy WAR to Tomcat (from Nexus)') {
+     when {
+      allOf {
+        expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
+        expression { params.DEPLOY_TO_TOMCAT }
+      }
+   }
+   steps {
     sshagent(credentials: ['tomcat_ssh']) {
       script {
-        // Resolve GAV
+        // Resolve GAV from the local POM
         def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",     returnStdout: true).trim()
         def artifactId = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId", returnStdout: true).trim()
         def groupId    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId",    returnStdout: true).trim()
         def isSnapshot = version.endsWith('-SNAPSHOT')
 
-        // Nexus URL (strip trailing slashes)
+        // Pick the right Nexus repo
         def releasesPath  = params.NEXUS_RELEASES_PATH.replaceAll('/+$','')
         def snapshotsPath = params.NEXUS_SNAPSHOTS_PATH.replaceAll('/+$','')
         def repoUrl       = isSnapshot ? "${env.NEXUS_BASE}/${snapshotsPath}" : "${env.NEXUS_BASE}/${releasesPath}"
@@ -165,37 +165,40 @@ pipeline {
         def warName   = "${artifactId}-${version}.war"
         def remoteWar = "/home/${params.TOMCAT_USER}/${params.APP_NAME}.war"
 
+        // Copy WAR then run a HEREDOC script over SSH (note the escaped $)
         sh """
           set -e
           echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
           scp -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:"${remoteWar}"
 
           echo "Restarting Tomcat and deploying WAR ..."
-          ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} /bin/bash -lc '
-            set -euo pipefail
+          ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} 'bash -s' << 'EOF'
+          set -euo pipefail
 
-            # Inline all paths to avoid Groovy \$-interpolation issues
-            WEBAPPS_DIR="${params.TOMCAT_WEBAPPS}"
-            BIN_DIR="${params.TOMCAT_BIN}"
-            APP_NAME="${params.APP_NAME}"
+          WEBAPPS_DIR="${params.TOMCAT_WEBAPPS}"
+          BIN_DIR="${params.TOMCAT_BIN}"
+          APP_NAME="${params.APP_NAME}"
+          REMOTE_WAR="${remoteWar}"
 
-            case "${params.TOMCAT_WEBAPPS}" in /|/root|"") echo "Unsafe webapps path: ${params.TOMCAT_WEBAPPS}"; exit 1 ;; esac
+          case "${params.TOMCAT_WEBAPPS}" in /|/root|"") echo "Unsafe webapps path: ${params.TOMCAT_WEBAPPS}"; exit 1 ;; esac
 
-            sudo rm -rf "${params.TOMCAT_WEBAPPS}/${params.APP_NAME}" "${params.TOMCAT_WEBAPPS}/${params.APP_NAME}.war" || true
-            sudo mv "${remoteWar}" "${params.TOMCAT_WEBAPPS}/"
+          # Clean old deploy & move new WAR
+          sudo rm -rf "\$WEBAPPS_DIR/\$APP_NAME" "\$WEBAPPS_DIR/\$APP_NAME.war" || true
+          sudo mv "\$REMOTE_WAR" "\$WEBAPPS_DIR/"
 
-            if [ -x "${params.TOMCAT_BIN}/shutdown.sh" ]; then
-              sudo "${params.TOMCAT_BIN}/shutdown.sh" || true
-              sleep 3
-              sudo "${params.TOMCAT_BIN}/startup.sh"
-            else
-              sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
-            fi
-          '
+          # Use Tomcat scripts if present
+          if [ -x "\$BIN_DIR/shutdown.sh" ]; then
+            sudo "\$BIN_DIR/shutdown.sh" || true
+            sleep 3
+            sudo "\$BIN_DIR/startup.sh"
+          else
+            echo "Tomcat scripts not found at \$BIN_DIR"; exit 1
+          fi
+          EOF
         """
-       }
+      }
      }
-    }
+   }
   }
     stage('Health Check') {
       when {
