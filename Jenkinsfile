@@ -1,10 +1,19 @@
 pipeline {
   agent any
-  options { timestamps() }
-  tools { jdk 'Java'; maven 'Maven' }
+  options {
+    timestamps()
+    ansiColor('xterm')
+  }
+  tools {
+    jdk 'Java'
+    maven 'Maven'
+  }
+
+  // Auto-build on GitHub push (webhook must point to /github-webhook/)
   triggers { githubPush() }
 
   parameters {
+    // Build branch (optional one-off override)
     string(name: 'BRANCH_OVERRIDE', defaultValue: '', description: 'Manually override branch (normally leave blank)')
 
     // Nexus
@@ -25,12 +34,12 @@ pipeline {
     string(name: 'APP_NAME',       defaultValue: 'NumberGuessGame',               description: 'WAR base name (no .war)')
     string(name: 'HEALTH_PATH',    defaultValue: '/NumberGuessGame/guess',        description: 'Health check path')
 
-    // Email
+    // Email (optional)
     string(name: 'EMAIL_TO', defaultValue: 'tijiebor@gmail.com', description: 'Build notifications recipients (comma separated)')
   }
 
   environment {
-    TARGET_BRANCH      = 'main'
+    TARGET_BRANCH      = 'main'  // build/deploy only from main
     NEXUS_BASE         = "http://${params.NEXUS_HOST}:${params.NEXUS_PORT}"
     NEXUS_RELEASES_ID  = 'nexus-releases'
     NEXUS_SNAPSHOTS_ID = 'nexus-snapshots'
@@ -39,18 +48,22 @@ pipeline {
 
   stages {
 
+    // Pin checkout to main unless overridden
     stage('Checkout SCM') {
       steps {
         script {
           def branchToBuild = (params.BRANCH_OVERRIDE?.trim()) ? params.BRANCH_OVERRIDE.trim() : env.TARGET_BRANCH
-          git branch: branchToBuild, url: 'https://github.com/Theo-DevProject/numberGuessGame.git'
+          git branch: branchToBuild,
+              url: 'https://github.com/Theo-DevProject/numberGuessGame.git'
           env.CURRENT_BRANCH = branchToBuild
           echo "Checked out branch: ${env.CURRENT_BRANCH}"
         }
       }
     }
 
-    stage('Tool Install') { steps { sh 'java -version && mvn -v' } }
+    stage('Tool Install') {
+      steps { sh 'java -version && mvn -v' }
+    }
 
     stage('Generate Maven settings.xml') {
       steps {
@@ -75,9 +88,27 @@ pipeline {
       }
       post {
         always {
+          // Standard JUnit publisher (drives Jenkins test graphs, test history, etc.)
           junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
+          // Keep artifacts
           archiveArtifacts artifacts: 'target/*.war, target/site/jacoco/*.xml', allowEmptyArchive: true, fingerprint: true
         }
+      }
+    }
+
+    // Pretty HTML report for test results (appears as a link on each build)
+    stage('Publish HTML Test Report') {
+      steps {
+        // Generate Surefire HTML summary without re-running tests
+        sh 'mvn -B surefire-report:report-only -Daggregate=false'
+        publishHTML(target: [
+          reportDir: 'target/site',
+          reportFiles: 'surefire-report.html',
+          reportName: 'JUnit HTML Report',
+          keepAll: true,
+          allowMissing: false,
+          alwaysLinkToLastBuild: false
+        ])
       }
     }
 
@@ -96,7 +127,11 @@ pipeline {
     }
 
     stage('Quality Gate') {
-      steps { timeout(time: 10, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } }
+      steps {
+        timeout(time: 10, unit: 'MINUTES') {
+          waitForQualityGate abortPipeline: true
+        }
+      }
     }
 
     stage('Deploy to Nexus') {
@@ -109,7 +144,6 @@ pipeline {
           def repoUrl    = isSnapshot ? "${env.NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH}"
                                       : "${env.NEXUS_BASE}/${params.NEXUS_RELEASES_PATH}"
           echo "Version: ${version} (snapshot? ${isSnapshot}) → ${repoId} @ ${repoUrl}"
-
           sh """
             mvn -B -s jenkins-settings.xml -DskipTests deploy \
               -DaltDeploymentRepository=${repoId}::default::${repoUrl}
@@ -125,56 +159,72 @@ pipeline {
       }
     }
 
-  stage('Deploy WAR to Tomcat (from Nexus)') {
-  when {
-    allOf {
-      expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
-      expression { params.DEPLOY_TO_TOMCAT }
+    stage('Deploy WAR to Tomcat (from Nexus)') {
+      when {
+        allOf {
+          expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
+          expression { params.DEPLOY_TO_TOMCAT }
+        }
+      }
+      steps {
+        // If you use a managed SSH key in Jenkins, wrap with sshagent(credentials: ['tomcat_ssh']) { ... }
+        script {
+          // Resolve GAV from the POM of this project
+          def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",     returnStdout: true).trim()
+          def artifactId = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId", returnStdout: true).trim()
+          def groupId    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId",    returnStdout: true).trim()
+          def isSnapshot = version.endsWith('-SNAPSHOT')
+
+          // Pick the right Nexus repo URL (strip any trailing slash in the path)
+          def releasesPath  = params.NEXUS_RELEASES_PATH.replaceAll('/+$','')
+          def snapshotsPath = params.NEXUS_SNAPSHOTS_PATH.replaceAll('/+$','')
+          def repoUrl       = isSnapshot ? "${env.NEXUS_BASE}/${snapshotsPath}" : "${env.NEXUS_BASE}/${releasesPath}"
+
+          echo "Resolving ${groupId}:${artifactId}:${version}:war from ${repoUrl} ..."
+          // Use maven-dependency-plugin to copy the WAR locally from Nexus
+          sh """
+            mvn -B -q org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
+              -DremoteRepositories=nexus::::${repoUrl} \
+              -Dartifact=${groupId}:${artifactId}:${version}:war \
+              -DoutputDirectory=. \
+              -Dtransitive=false
+          """
+          def warName = "${artifactId}-${version}.war"
+          echo "Downloaded WAR: ${warName}"
+
+          // SCP to Tomcat host and restart via local scripts
+          sh """
+            set -e
+            echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
+            scp -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:/home/${params.TOMCAT_USER}/${params.APP_NAME}.war
+
+            echo "Restarting Tomcat and deploying WAR ..."
+            ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} /bin/bash -lc '
+              set -euo pipefail
+
+              WEBAPPS_DIR="${params.TOMCAT_WEBAPPS}"
+              BIN_DIR="${params.TOMCAT_BIN}"
+              APP_NAME="${params.APP_NAME}"
+
+              case "$WEBAPPS_DIR" in /|/root|"") echo "Unsafe webapps path: $WEBAPPS_DIR"; exit 1 ;; esac
+              [ -d "$WEBAPPS_DIR" ] || { echo "Webapps dir not found: $WEBAPPS_DIR"; exit 1; }
+              [ -d "$BIN_DIR" ] || { echo "Tomcat bin not found: $BIN_DIR"; exit 1; }
+
+              sudo rm -rf "$WEBAPPS_DIR/$APP_NAME" "$WEBAPPS_DIR/$APP_NAME.war" || true
+              sudo mv "/home/${params.TOMCAT_USER}/${params.APP_NAME}.war" "$WEBAPPS_DIR/"
+
+              if [ -x "$BIN_DIR/shutdown.sh" ] && [ -x "$BIN_DIR/startup.sh" ]; then
+                sudo "$BIN_DIR/shutdown.sh" || true
+                sleep 3
+                sudo "$BIN_DIR/startup.sh"
+              else
+                echo "Tomcat scripts not executable in $BIN_DIR"; exit 1
+              fi
+            '
+          """
+        }
+      }
     }
-  }
-  steps {
-    sshagent(credentials: ['tomcat_ssh']) {
-      script {
-        def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",     returnStdout: true).trim()
-        def artifactId = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId", returnStdout: true).trim()
-        def groupId    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId",    returnStdout: true).trim()
-
-        def isSnapshot   = version.endsWith('-SNAPSHOT')
-        def releasesPath = params.NEXUS_RELEASES_PATH.replaceAll('/+$','')
-        def snapshotsPath= params.NEXUS_SNAPSHOTS_PATH.replaceAll('/+$','')
-        def repoUrl      = isSnapshot ? "${env.NEXUS_BASE}/${snapshotsPath}" : "${env.NEXUS_BASE}/${releasesPath}"
-
-        echo "Resolving ${groupId}:${artifactId}:${version}:war from ${repoUrl} ..."
-        sh """
-          mvn -B -q org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
-            -DremoteRepositories=nexus::::${repoUrl} \
-            -Dartifact=${groupId}:${artifactId}:${version}:war \
-            -DoutputDirectory=. \
-            -Dtransitive=false
-        """
-        def warName = "${artifactId}-${version}.war"
-        echo "Downloaded WAR: ${warName}"
-
-        sh """
-          set -e
-          echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
-          scp -o BatchMode=yes -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:/home/${params.TOMCAT_USER}/${params.APP_NAME}.war
-
-          echo "Restarting Tomcat and deploying WAR ..."
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} "set -euo pipefail; \
-            case '${params.TOMCAT_WEBAPPS}' in /|/root|'' ) echo 'Unsafe webapps path: ${params.TOMCAT_WEBAPPS}'; exit 1 ;; esac; \
-            [ -d '${params.TOMCAT_WEBAPPS}' ] || { echo 'Webapps dir not found: ${params.TOMCAT_WEBAPPS}'; exit 1; }; \
-            [ -d '${params.TOMCAT_BIN}' ] || { echo 'Tomcat bin not found: ${params.TOMCAT_BIN}'; exit 1; }; \
-            sudo rm -rf '${params.TOMCAT_WEBAPPS}/${params.APP_NAME}' '${params.TOMCAT_WEBAPPS}/${params.APP_NAME}.war' || true; \
-            sudo mv '/home/${params.TOMCAT_USER}/${params.APP_NAME}.war' '${params.TOMCAT_WEBAPPS}/'; \
-            sudo chmod +x '${params.TOMCAT_BIN}/'*.sh || true; \
-            [ -x '${params.TOMCAT_BIN}/shutdown.sh' ] && [ -x '${params.TOMCAT_BIN}/startup.sh' ] || { echo 'Tomcat scripts not executable in ${params.TOMCAT_BIN}'; exit 1; }; \
-            sudo '${params.TOMCAT_BIN}/shutdown.sh' || true; sleep 3; sudo '${params.TOMCAT_BIN}/startup.sh'"
-        """
-       }
-     }
-   }
- }
 
     stage('Health Check') {
       when {
