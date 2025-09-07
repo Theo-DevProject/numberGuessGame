@@ -139,7 +139,7 @@ pipeline {
       }
     }
 
-      stage('Deploy WAR to Tomcat (from Nexus)') {
+  stage('Deploy WAR to Tomcat (from Nexus)') {
   when {
     allOf {
       expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
@@ -175,14 +175,14 @@ pipeline {
         def T_WEBAPPS = params.TOMCAT_WEBAPPS?.trim() ?: ''
         def T_BIN     = params.TOMCAT_BIN?.trim()     ?: ''
         def APP       = params.APP_NAME?.trim()       ?: ''
-
         if (!T_WEBAPPS || !T_BIN || !APP) {
           error "Required parameters empty (TOMCAT_WEBAPPS='${T_WEBAPPS}', TOMCAT_BIN='${T_BIN}', APP_NAME='${APP}')"
         }
 
-        // ---- Copy & deploy (values injected explicitly into the remote shell)
+        // ---- Copy & deploy (values injected explicitly; escape $ for Groovy)
         sh """
           set -e
+
           echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
           scp -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:/home/${params.TOMCAT_USER}/${APP}.war
 
@@ -199,7 +199,7 @@ pipeline {
 
             # Deploy
             sudo rm -rf "\\$T_WEBAPPS/\\$APP" "\\$T_WEBAPPS/\\$APP.war" || true
-            sudo mv "/home/${params.TOMCAT_USER}/\\$APP.war" "\\$T_WEBAPPS/"
+            sudo mv "/home/${params.TOMCAT_USER}/\\${APP}.war" "\\$T_WEBAPPS/"
 
             # Restart Tomcat
             if [ -x "\\$T_BIN/shutdown.sh" ]; then
@@ -211,10 +211,10 @@ pipeline {
             fi
           '
         """
-       }
-     }
-   }
- }
+      }
+    }
+  }
+}
 
     stage('Health Check') {
       when {
