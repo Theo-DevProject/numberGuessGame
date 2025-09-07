@@ -91,17 +91,18 @@ pipeline {
       }
     }
 
- stage('Publish HTML Test Report') {
+stage('Publish HTML Test Report') {
   steps {
-    // Generate Surefire HTML summary without re-running tests
+    // Generate the Surefire HTML without re-running tests
     sh 'mvn -B surefire-report:report-only -Daggregate=false'
 
-    // Keep the HTML so you can download it from the build page
-     archiveArtifacts artifacts: 'target/site/surefire-report.html', fingerprint: true
-    // (Optional) keep all supporting assets too:
-    // archiveArtifacts artifacts: 'target/site/**', fingerprint: true
-    }
+    // Debug: show where it landed
+    sh 'echo "Listing potential report locations:" && ls -laR | sed -n "/target\\/site/p" || true'
+
+    // Archive recursively (handles single or multi-module)
+    archiveArtifacts artifacts: '**/target/site/**', fingerprint: true, allowEmptyArchive: false
   }
+}
 
     stage('Static Analysis (SonarQube)') {
       steps {
