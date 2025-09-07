@@ -91,27 +91,17 @@ pipeline {
       }
     }
 
-    stage('Publish HTML Test Report') {
-      steps {
-        sh 'mvn -B surefire-report:report-only -Daggregate=false'
-        script {
-          try {
-            publishHTML(target: [
-              reportDir: 'target/site',
-              reportFiles: 'surefire-report.html',
-              reportName: 'JUnit HTML Report',
-              keepAll: true,
-              allowMissing: false,
-              alwaysLinkToLastBuild: false
-            ])
-          } catch (err) {
-            echo "HTML Publisher plugin missing; archiving the HTML instead. ${err}"
-            archiveArtifacts artifacts: 'target/site/surefire-report.html',
-                             allowEmptyArchive: true, fingerprint: true
-          }
-        }
-      }
+ stage('Publish HTML Test Report') {
+  steps {
+    // Generate Surefire HTML summary without re-running tests
+    sh 'mvn -B surefire-report:report-only -Daggregate=false'
+
+    // Keep the HTML so you can download it from the build page
+     archiveArtifacts artifacts: 'target/site/surefire-report.html', fingerprint: true
+    // (Optional) keep all supporting assets too:
+    // archiveArtifacts artifacts: 'target/site/**', fingerprint: true
     }
+  }
 
     stage('Static Analysis (SonarQube)') {
       steps {
