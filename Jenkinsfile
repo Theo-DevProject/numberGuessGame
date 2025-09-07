@@ -3,17 +3,16 @@ pipeline {
   options {
     timestamps()
     ansiColor('xterm')
+    buildDiscarder(logRotator(numToKeepStr: '30')) // keep history tidy
   }
   tools {
     jdk 'Java'
     maven 'Maven'
   }
 
-  // Auto-build on GitHub push (webhook must point to /github-webhook/)
   triggers { githubPush() }
 
   parameters {
-    // Build branch (optional one-off override)
     string(name: 'BRANCH_OVERRIDE', defaultValue: '', description: 'Manually override branch (normally leave blank)')
 
     // Nexus
@@ -34,27 +33,25 @@ pipeline {
     string(name: 'APP_NAME',       defaultValue: 'NumberGuessGame',               description: 'WAR base name (no .war)')
     string(name: 'HEALTH_PATH',    defaultValue: '/NumberGuessGame/guess',        description: 'Health check path')
 
-    // Email (optional)
+    // Email
     string(name: 'EMAIL_TO', defaultValue: 'tijiebor@gmail.com', description: 'Build notifications recipients (comma separated)')
   }
 
   environment {
-    TARGET_BRANCH      = 'main'  // build/deploy only from main
+    TARGET_BRANCH      = 'main'
     NEXUS_BASE         = "http://${params.NEXUS_HOST}:${params.NEXUS_PORT}"
     NEXUS_RELEASES_ID  = 'nexus-releases'
     NEXUS_SNAPSHOTS_ID = 'nexus-snapshots'
-    SONAR_AUTH_TOKEN   = credentials('sonar_token') // Secret Text in Jenkins
+    SONAR_AUTH_TOKEN   = credentials('sonar_token')
   }
 
   stages {
 
-    // Pin checkout to main unless overridden
     stage('Checkout SCM') {
       steps {
         script {
           def branchToBuild = (params.BRANCH_OVERRIDE?.trim()) ? params.BRANCH_OVERRIDE.trim() : env.TARGET_BRANCH
-          git branch: branchToBuild,
-              url: 'https://github.com/Theo-DevProject/numberGuessGame.git'
+          git branch: branchToBuild, url: 'https://github.com/Theo-DevProject/numberGuessGame.git'
           env.CURRENT_BRANCH = branchToBuild
           echo "Checked out branch: ${env.CURRENT_BRANCH}"
         }
@@ -88,27 +85,31 @@ pipeline {
       }
       post {
         always {
-          // Standard JUnit publisher (drives Jenkins test graphs, test history, etc.)
           junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
-          // Keep artifacts
           archiveArtifacts artifacts: 'target/*.war, target/site/jacoco/*.xml', allowEmptyArchive: true, fingerprint: true
         }
       }
     }
 
-    // Pretty HTML report for test results (appears as a link on each build)
     stage('Publish HTML Test Report') {
       steps {
-        // Generate Surefire HTML summary without re-running tests
         sh 'mvn -B surefire-report:report-only -Daggregate=false'
-        publishHTML(target: [
-          reportDir: 'target/site',
-          reportFiles: 'surefire-report.html',
-          reportName: 'JUnit HTML Report',
-          keepAll: true,
-          allowMissing: false,
-          alwaysLinkToLastBuild: false
-        ])
+        script {
+          try {
+            publishHTML(target: [
+              reportDir: 'target/site',
+              reportFiles: 'surefire-report.html',
+              reportName: 'JUnit HTML Report',
+              keepAll: true,
+              allowMissing: false,
+              alwaysLinkToLastBuild: false
+            ])
+          } catch (err) {
+            echo "HTML Publisher plugin missing; archiving the HTML instead. ${err}"
+            archiveArtifacts artifacts: 'target/site/surefire-report.html',
+                             allowEmptyArchive: true, fingerprint: true
+          }
+        }
       }
     }
 
@@ -167,21 +168,17 @@ pipeline {
         }
       }
       steps {
-        // If you use a managed SSH key in Jenkins, wrap with sshagent(credentials: ['tomcat_ssh']) { ... }
         script {
-          // Resolve GAV from the POM of this project
           def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",     returnStdout: true).trim()
           def artifactId = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId", returnStdout: true).trim()
           def groupId    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId",    returnStdout: true).trim()
           def isSnapshot = version.endsWith('-SNAPSHOT')
 
-          // Pick the right Nexus repo URL (strip any trailing slash in the path)
           def releasesPath  = params.NEXUS_RELEASES_PATH.replaceAll('/+$','')
           def snapshotsPath = params.NEXUS_SNAPSHOTS_PATH.replaceAll('/+$','')
           def repoUrl       = isSnapshot ? "${env.NEXUS_BASE}/${snapshotsPath}" : "${env.NEXUS_BASE}/${releasesPath}"
 
           echo "Resolving ${groupId}:${artifactId}:${version}:war from ${repoUrl} ..."
-          // Use maven-dependency-plugin to copy the WAR locally from Nexus
           sh """
             mvn -B -q org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
               -DremoteRepositories=nexus::::${repoUrl} \
@@ -192,7 +189,6 @@ pipeline {
           def warName = "${artifactId}-${version}.war"
           echo "Downloaded WAR: ${warName}"
 
-          // SCP to Tomcat host and restart via local scripts
           sh """
             set -e
             echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
