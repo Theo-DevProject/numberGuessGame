@@ -58,7 +58,7 @@ cd NumberGuessGame
 	•	Ensure maven-releases and maven-snapshots repos are created
 	•	Update settings.xml in Jenkins with <servers> block for Nexus credentials
 
-6. Tomcat Server
+6. Tomcat Serv
 	•	Install Tomcat on a separate EC2 instance
 	•	Ensure Jenkins user can SSH into Tomcat server with deployment key
 
