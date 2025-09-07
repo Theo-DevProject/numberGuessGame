@@ -129,6 +129,16 @@ pipeline {
       }
     }
 
+    // --- NEW: prove SSH key works before deploy
+    stage('Preflight SSH to Tomcat') {
+      when { expression { env.CURRENT_BRANCH == env.TARGET_BRANCH && params.DEPLOY_TO_TOMCAT } }
+      steps {
+        sshagent(credentials: ['tomcat_ssh']) {
+          sh 'ssh -o StrictHostKeyChecking=no ${TOMCAT_USER}@${TOMCAT_HOST} "echo SSH_OK && whoami && hostname"'
+        }
+      }
+    }
+
     stage('Deploy WAR to Tomcat (from Nexus)') {
       when {
         allOf {
@@ -161,39 +171,41 @@ pipeline {
           def warName = "${artifactId}-${version}.war"
           echo "Downloaded WAR: ${warName}"
 
-          // SCP then deploy with safe var handling inside remote shell
-          sh """
-            set -e
-            echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
-            scp -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:/home/${params.TOMCAT_USER}/${params.APP_NAME}.war
+          // SCP then deploy with sshagent, using a here-doc for the remote script
+          sshagent(credentials: ['tomcat_ssh']) {
+            sh """
+              set -e
+              echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
+              scp -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:/home/${params.TOMCAT_USER}/${params.APP_NAME}.war
 
-            echo "Restarting Tomcat and deploying WAR ..."
-            ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} \"\"\"
-              set -euo pipefail
-              T_WEBAPPS='${params.TOMCAT_WEBAPPS}'
-              T_BIN='${params.TOMCAT_BIN}'
-              APP='${params.APP_NAME}'
+              echo "Restarting Tomcat and deploying WAR ..."
+              ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} 'bash -s' <<EOF
+set -euo pipefail
+T_WEBAPPS="${params.TOMCAT_WEBAPPS}"
+T_BIN="${params.TOMCAT_BIN}"
+APP="${params.APP_NAME}"
 
-              if [ -z "\\\$T_WEBAPPS" ] || [ -z "\\\$T_BIN" ] || [ -z "\\\$APP" ]; then
-                echo 'One or more required vars empty (T_WEBAPPS/T_BIN/APP)'
-                exit 1
-              fi
-              case "\\\$T_WEBAPPS" in
-                /|/root|'') echo 'Refusing to operate on unsafe webapps path'; exit 1 ;;
-              esac
+if [ -z "\$T_WEBAPPS" ] || [ -z "\$T_BIN" ] || [ -z "\$APP" ]; then
+  echo 'One or more required vars empty (T_WEBAPPS/T_BIN/APP)'
+  exit 1
+fi
+case "\$T_WEBAPPS" in
+  /|/root|'') echo 'Refusing to operate on unsafe webapps path'; exit 1 ;;
+esac
 
-              sudo rm -rf "\\\$T_WEBAPPS/\\\$APP" "\\\$T_WEBAPPS/\\\$APP.war" || true
-              sudo mv /home/${params.TOMCAT_USER}/${params.APP_NAME}.war "\\\$T_WEBAPPS/"
+sudo rm -rf "\$T_WEBAPPS/\$APP" "\$T_WEBAPPS/\$APP.war" || true
+sudo mv /home/${params.TOMCAT_USER}/${params.APP_NAME}.war "\$T_WEBAPPS/"
 
-              if [ -x "\\\$T_BIN/shutdown.sh" ]; then
-                sudo "\\\$T_BIN/shutdown.sh" || true
-                sleep 3
-                sudo "\\\$T_BIN/startup.sh"
-              else
-                sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
-              fi
-            \"\"\"
-          """
+if [ -x "\$T_BIN/shutdown.sh" ]; then
+  sudo "\$T_BIN/shutdown.sh" || true
+  sleep 3
+  sudo "\$T_BIN/startup.sh"
+else
+  sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
+fi
+EOF
+            """
+          }
         }
       }
     }
