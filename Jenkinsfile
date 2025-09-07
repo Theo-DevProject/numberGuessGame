@@ -2,12 +2,9 @@ pipeline {
   agent any
   options { timestamps() }
   tools { jdk 'Java'; maven 'Maven' }
-
-  // Auto-build on GitHub push (webhook must point to /github-webhook/)
   triggers { githubPush() }
 
   parameters {
-    // Build branch (optional one-off override)
     string(name: 'BRANCH_OVERRIDE', defaultValue: '', description: 'Manually override branch (normally leave blank)')
 
     // Nexus
@@ -33,7 +30,7 @@ pipeline {
   }
 
   environment {
-    TARGET_BRANCH      = 'main'  // build/deploy only from main
+    TARGET_BRANCH      = 'main'
     NEXUS_BASE         = "http://${params.NEXUS_HOST}:${params.NEXUS_PORT}"
     NEXUS_RELEASES_ID  = 'nexus-releases'
     NEXUS_SNAPSHOTS_ID = 'nexus-snapshots'
@@ -41,13 +38,12 @@ pipeline {
   }
 
   stages {
-    // Pin checkout to main unless overridden
+
     stage('Checkout SCM') {
       steps {
         script {
           def branchToBuild = (params.BRANCH_OVERRIDE?.trim()) ? params.BRANCH_OVERRIDE.trim() : env.TARGET_BRANCH
-          git branch: branchToBuild,
-              url: 'https://github.com/Theo-DevProject/numberGuessGame.git'
+          git branch: branchToBuild, url: 'https://github.com/Theo-DevProject/numberGuessGame.git'
           env.CURRENT_BRANCH = branchToBuild
           echo "Checked out branch: ${env.CURRENT_BRANCH}"
         }
@@ -100,18 +96,14 @@ pipeline {
     }
 
     stage('Quality Gate') {
-      steps {
-        timeout(time: 10, unit: 'MINUTES') {
-          waitForQualityGate abortPipeline: true
-        }
-      }
+      steps { timeout(time: 10, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } }
     }
 
     stage('Deploy to Nexus') {
       when { expression { env.CURRENT_BRANCH == env.TARGET_BRANCH } }
       steps {
         script {
-          def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",     returnStdout: true).trim()
+          def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version", returnStdout: true).trim()
           def isSnapshot = version.endsWith('-SNAPSHOT')
           def repoId     = isSnapshot ? env.NEXUS_SNAPSHOTS_ID : env.NEXUS_RELEASES_ID
           def repoUrl    = isSnapshot ? "${env.NEXUS_BASE}/${params.NEXUS_SNAPSHOTS_PATH}"
@@ -133,89 +125,60 @@ pipeline {
       }
     }
 
- stage('Deploy WAR to Tomcat (from Nexus)') {
-     when {
-      allOf {
-        expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
-        expression { params.DEPLOY_TO_TOMCAT }
+    stage('Deploy WAR to Tomcat (from Nexus)') {
+      when {
+        allOf {
+          expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
+          expression { params.DEPLOY_TO_TOMCAT }
+        }
       }
-   }
-   steps {
-    sshagent(credentials: ['tomcat_ssh']) {
-      script {
-        // Resolve GAV from the local POM
-        def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",     returnStdout: true).trim()
-        def artifactId = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId", returnStdout: true).trim()
-        def groupId    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId",    returnStdout: true).trim()
-        def isSnapshot = version.endsWith('-SNAPSHOT')
+      steps {
+        sshagent(credentials: ['tomcat_ssh']) {
+          script {
+            def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",     returnStdout: true).trim()
+            def artifactId = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId", returnStdout: true).trim()
+            def groupId    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId",    returnStdout: true).trim()
 
-        // Pick the right Nexus repo
-        def releasesPath  = params.NEXUS_RELEASES_PATH.replaceAll('/+$','')
-        def snapshotsPath = params.NEXUS_SNAPSHOTS_PATH.replaceAll('/+$','')
-        def repoUrl       = isSnapshot ? "${env.NEXUS_BASE}/${snapshotsPath}" : "${env.NEXUS_BASE}/${releasesPath}"
+            def isSnapshot = version.endsWith('-SNAPSHOT')
+            def releasesPath  = params.NEXUS_RELEASES_PATH.replaceAll('/+$','')
+            def snapshotsPath = params.NEXUS_SNAPSHOTS_PATH.replaceAll('/+$','')
+            def repoUrl       = isSnapshot ? "${env.NEXUS_BASE}/${snapshotsPath}" : "${env.NEXUS_BASE}/${releasesPath}"
 
-        echo "Resolving ${groupId}:${artifactId}:${version}:war from ${repoUrl} ..."
-        sh """
-          mvn -B -q org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
-            -DremoteRepositories=nexus::::${repoUrl} \
-            -Dartifact=${groupId}:${artifactId}:${version}:war \
-            -DoutputDirectory=. \
-            -Dtransitive=false
-        """
-        def warName   = "${artifactId}-${version}.war"
-        def remoteWar = "/home/${params.TOMCAT_USER}/${params.APP_NAME}.war"
+            echo "Resolving ${groupId}:${artifactId}:${version}:war from ${repoUrl} ..."
+            sh """
+              mvn -B -q org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
+                -DremoteRepositories=nexus::::${repoUrl} \
+                -Dartifact=${groupId}:${artifactId}:${version}:war \
+                -DoutputDirectory=. \
+                -Dtransitive=false
+            """
+            def warName = "${artifactId}-${version}.war"
+            echo "Downloaded WAR: ${warName}"
 
-        // Copy WAR then run a HEREDOC script over SSH (note the escaped $)
-  sh """
-  set -e
-  echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
-  scp -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:/home/${params.TOMCAT_USER}/${params.APP_NAME}.war
+            // Copy WAR and restart Tomcat using the parameterized paths directly.
+            sh """
+              set -e
+              echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
+              scp -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:/home/${params.TOMCAT_USER}/${params.APP_NAME}.war
 
-  echo "Restarting Tomcat and deploying WAR ..."
-  ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} /bin/bash -lc '
-    set -euo pipefail
-
-    # 1) Discover Tomcat home
-    CANDIDATES=(
-      "${params.TOMCAT_BIN%/}/.."
-      "/opt/apache-tomcat-10.1.44"
-      "/opt/tomcat"
-      "/usr/share/tomcat9"
-      "/usr/share/tomcat"
-    )
-    T_HOME=""
-    for d in "${CANDIDATES[@]}"; do
-      [ -n "$d" ] && [ -x "$d/bin/startup.sh" ] && [ -d "$d/webapps" ] && { T_HOME="$d"; break; }
-    done
-    if [ -z "$T_HOME" ]; then
-      echo "Tomcat not found in candidates:"; printf " - %s\\n" "${CANDIDATES[@]}"; exit 1
-    fi
-    echo "✅ Using TOMCAT_HOME=\$T_HOME"
-
-    WEBAPPS_DIR="\$T_HOME/webapps"
-    BIN_DIR="\$T_HOME/bin"
-    APP_NAME="${params.APP_NAME}"
-
-    case "\$WEBAPPS_DIR" in /|/root|"") echo "Unsafe webapps path: \$WEBAPPS_DIR"; exit 1 ;; esac
-
-    echo "Removing old app and placing new WAR..."
-    sudo rm -rf "\$WEBAPPS_DIR/\$APP_NAME" "\$WEBAPPS_DIR/\$APP_NAME.war" || true
-    sudo mv "/home/${params.TOMCAT_USER}/\${APP_NAME}.war" "\$WEBAPPS_DIR/"
-
-    echo "Restarting Tomcat..."
-    if [ -x "\$BIN_DIR/shutdown.sh" ]; then
-      sudo "\$BIN_DIR/shutdown.sh" || true
-      sleep 3
-      sudo "\$BIN_DIR/startup.sh"
-    else
-      sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
-    fi
-  '
-"""
+              echo "Restarting Tomcat and deploying WAR ..."
+              ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} "set -euo pipefail; \
+                case '${params.TOMCAT_WEBAPPS}' in /|/root|'' ) echo 'Unsafe webapps path: ${params.TOMCAT_WEBAPPS}'; exit 1 ;; esac; \
+                if [ ! -d '${params.TOMCAT_WEBAPPS}' ]; then echo 'Webapps dir not found: ${params.TOMCAT_WEBAPPS}'; exit 1; fi; \
+                if [ ! -d '${params.TOMCAT_BIN}' ]; then echo 'Tomcat bin not found: ${params.TOMCAT_BIN}'; exit 1; fi; \
+                sudo rm -rf '${params.TOMCAT_WEBAPPS}/${params.APP_NAME}' '${params.TOMCAT_WEBAPPS}/${params.APP_NAME}.war' || true; \
+                sudo mv '/home/${params.TOMCAT_USER}/${params.APP_NAME}.war' '${params.TOMCAT_WEBAPPS}/'; \
+                if [ -x '${params.TOMCAT_BIN}/shutdown.sh' ]; then \
+                  sudo '${params.TOMCAT_BIN}/shutdown.sh' || true; sleep 3; sudo '${params.TOMCAT_BIN}/startup.sh'; \
+                else \
+                  sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true; \
+                fi"
+            """
+          }
+        }
       }
-     }
-   }
-  }
+    }
+
     stage('Health Check') {
       when {
         allOf {
