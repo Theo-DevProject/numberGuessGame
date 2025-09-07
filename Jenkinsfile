@@ -166,36 +166,52 @@ pipeline {
         def remoteWar = "/home/${params.TOMCAT_USER}/${params.APP_NAME}.war"
 
         // Copy WAR then run a HEREDOC script over SSH (note the escaped $)
-        sh """
-          set -e
-          echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
-          scp -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:"${remoteWar}"
+  sh """
+  set -e
+  echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
+  scp -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:/home/${params.TOMCAT_USER}/${params.APP_NAME}.war
 
-          echo "Restarting Tomcat and deploying WAR ..."
-          ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} 'bash -s' << 'EOF'
-          set -euo pipefail
+  echo "Restarting Tomcat and deploying WAR ..."
+  ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} /bin/bash -lc '
+    set -euo pipefail
 
-          WEBAPPS_DIR="${params.TOMCAT_WEBAPPS}"
-          BIN_DIR="${params.TOMCAT_BIN}"
-          APP_NAME="${params.APP_NAME}"
-          REMOTE_WAR="${remoteWar}"
+    # 1) Discover Tomcat home
+    CANDIDATES=(
+      "${params.TOMCAT_BIN%/}/.."
+      "/opt/apache-tomcat-10.1.44"
+      "/opt/tomcat"
+      "/usr/share/tomcat9"
+      "/usr/share/tomcat"
+    )
+    T_HOME=""
+    for d in "${CANDIDATES[@]}"; do
+      [ -n "$d" ] && [ -x "$d/bin/startup.sh" ] && [ -d "$d/webapps" ] && { T_HOME="$d"; break; }
+    done
+    if [ -z "$T_HOME" ]; then
+      echo "Tomcat not found in candidates:"; printf " - %s\\n" "${CANDIDATES[@]}"; exit 1
+    fi
+    echo "✅ Using TOMCAT_HOME=\$T_HOME"
 
-          case "${params.TOMCAT_WEBAPPS}" in /|/root|"") echo "Unsafe webapps path: ${params.TOMCAT_WEBAPPS}"; exit 1 ;; esac
+    WEBAPPS_DIR="\$T_HOME/webapps"
+    BIN_DIR="\$T_HOME/bin"
+    APP_NAME="${params.APP_NAME}"
 
-          # Clean old deploy & move new WAR
-          sudo rm -rf "\$WEBAPPS_DIR/\$APP_NAME" "\$WEBAPPS_DIR/\$APP_NAME.war" || true
-          sudo mv "\$REMOTE_WAR" "\$WEBAPPS_DIR/"
+    case "\$WEBAPPS_DIR" in /|/root|"") echo "Unsafe webapps path: \$WEBAPPS_DIR"; exit 1 ;; esac
 
-          # Use Tomcat scripts if present
-          if [ -x "\$BIN_DIR/shutdown.sh" ]; then
-            sudo "\$BIN_DIR/shutdown.sh" || true
-            sleep 3
-            sudo "\$BIN_DIR/startup.sh"
-          else
-            echo "Tomcat scripts not found at \$BIN_DIR"; exit 1
-          fi
-          EOF
-        """
+    echo "Removing old app and placing new WAR..."
+    sudo rm -rf "\$WEBAPPS_DIR/\$APP_NAME" "\$WEBAPPS_DIR/\$APP_NAME.war" || true
+    sudo mv "/home/${params.TOMCAT_USER}/\${APP_NAME}.war" "\$WEBAPPS_DIR/"
+
+    echo "Restarting Tomcat..."
+    if [ -x "\$BIN_DIR/shutdown.sh" ]; then
+      sudo "\$BIN_DIR/shutdown.sh" || true
+      sleep 3
+      sudo "\$BIN_DIR/startup.sh"
+    else
+      sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
+    fi
+  '
+"""
       }
      }
    }
