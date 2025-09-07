@@ -133,75 +133,70 @@ pipeline {
       }
     }
 
-    stage('Deploy WAR to Tomcat (from Nexus)') {
-      when {
-        allOf {
-          expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
-          expression { params.DEPLOY_TO_TOMCAT }
-        }
-      }
-      steps {
-        sshagent(credentials: ['tomcat_ssh']) {
-          script {
-            // Resolve GAV from the POM of this project
-            def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",     returnStdout: true).trim()
-            def artifactId = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId", returnStdout: true).trim()
-            def groupId    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId",    returnStdout: true).trim()
-            def isSnapshot = version.endsWith('-SNAPSHOT')
-
-            // Pick the right Nexus repo URL (strip any trailing slash in the path)
-            def releasesPath  = params.NEXUS_RELEASES_PATH.replaceAll('/+$','')
-            def snapshotsPath = params.NEXUS_SNAPSHOTS_PATH.replaceAll('/+$','')
-            def repoUrl       = isSnapshot ? "${env.NEXUS_BASE}/${snapshotsPath}" : "${env.NEXUS_BASE}/${releasesPath}"
-
-            echo "Resolving ${groupId}:${artifactId}:${version}:war from ${repoUrl} ..."
-            // Use maven-dependency-plugin to copy the WAR locally from Nexus
-            sh """
-              mvn -B -q org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
-                -DremoteRepositories=nexus::::${repoUrl} \
-                -Dartifact=${groupId}:${artifactId}:${version}:war \
-                -DoutputDirectory=. \
-                -Dtransitive=false
-            """
-            def warName   = "${artifactId}-${version}.war"
-            def remoteWar = "/home/${params.TOMCAT_USER}/" + params.APP_NAME + ".war"
-            echo "Downloaded WAR: ${warName}"
-
-            // SCP then deploy with safe var handling inside remote shell
-            sh """
-              set -e
-
-              echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
-              scp -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:"${remoteWar}"
-
-              echo "Restarting Tomcat and deploying WAR ..."
-              ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} \\
-                T_WEBAPPS='${params.TOMCAT_WEBAPPS}' \\
-                T_BIN='${params.TOMCAT_BIN}' \\
-                APP='${params.APP_NAME}' \\
-                /bin/bash -lc '
-                  set -euo pipefail
-
-                  [ -n "\\$T_WEBAPPS" ] && [ -n "\\$T_BIN" ] && [ -n "\\$APP" ] || { echo "One or more required vars empty (T_WEBAPPS/T_BIN/APP)"; exit 1; }
-                  case "\\$T_WEBAPPS" in /|/root|"") echo "Refusing to operate on unsafe webapps path: \\$T_WEBAPPS"; exit 1 ;; esac
-
-                  sudo rm -rf "\\$T_WEBAPPS/\\$APP" "\\$T_WEBAPPS/\\$APP.war" || true
-                  sudo mv "${remoteWar}" "\\$T_WEBAPPS/"
-
-                  if [ -x "\\$T_BIN/shutdown.sh" ]; then
-                    sudo "\\$T_BIN/shutdown.sh" || true
-                    sleep 3
-                    sudo "\\$T_BIN/startup.sh"
-                  else
-                    sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
-                  fi
-                '
-            """
-          }
-        }
-      }
+  stage('Deploy WAR to Tomcat (from Nexus)') {
+   when {
+     allOf {
+      expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
+      expression { params.DEPLOY_TO_TOMCAT }
     }
+  }
+  steps {
+    sshagent(credentials: ['tomcat_ssh']) {
+      script {
+        // Resolve GAV
+        def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",     returnStdout: true).trim()
+        def artifactId = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId", returnStdout: true).trim()
+        def groupId    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId",    returnStdout: true).trim()
+        def isSnapshot = version.endsWith('-SNAPSHOT')
 
+        // Nexus URL (strip trailing slashes)
+        def releasesPath  = params.NEXUS_RELEASES_PATH.replaceAll('/+$','')
+        def snapshotsPath = params.NEXUS_SNAPSHOTS_PATH.replaceAll('/+$','')
+        def repoUrl       = isSnapshot ? "${env.NEXUS_BASE}/${snapshotsPath}" : "${env.NEXUS_BASE}/${releasesPath}"
+
+        echo "Resolving ${groupId}:${artifactId}:${version}:war from ${repoUrl} ..."
+        sh """
+          mvn -B -q org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
+            -DremoteRepositories=nexus::::${repoUrl} \
+            -Dartifact=${groupId}:${artifactId}:${version}:war \
+            -DoutputDirectory=. \
+            -Dtransitive=false
+        """
+        def warName   = "${artifactId}-${version}.war"
+        def remoteWar = "/home/${params.TOMCAT_USER}/${params.APP_NAME}.war"
+
+        sh """
+          set -e
+          echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
+          scp -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:"${remoteWar}"
+
+          echo "Restarting Tomcat and deploying WAR ..."
+          ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} /bin/bash -lc '
+            set -euo pipefail
+
+            # Inline all paths to avoid Groovy \$-interpolation issues
+            WEBAPPS_DIR="${params.TOMCAT_WEBAPPS}"
+            BIN_DIR="${params.TOMCAT_BIN}"
+            APP_NAME="${params.APP_NAME}"
+
+            case "${params.TOMCAT_WEBAPPS}" in /|/root|"") echo "Unsafe webapps path: ${params.TOMCAT_WEBAPPS}"; exit 1 ;; esac
+
+            sudo rm -rf "${params.TOMCAT_WEBAPPS}/${params.APP_NAME}" "${params.TOMCAT_WEBAPPS}/${params.APP_NAME}.war" || true
+            sudo mv "${remoteWar}" "${params.TOMCAT_WEBAPPS}/"
+
+            if [ -x "${params.TOMCAT_BIN}/shutdown.sh" ]; then
+              sudo "${params.TOMCAT_BIN}/shutdown.sh" || true
+              sleep 3
+              sudo "${params.TOMCAT_BIN}/startup.sh"
+            else
+              sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true
+            fi
+          '
+        """
+       }
+     }
+    }
+  }
     stage('Health Check') {
       when {
         allOf {
