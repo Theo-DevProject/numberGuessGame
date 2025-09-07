@@ -125,59 +125,56 @@ pipeline {
       }
     }
 
-    stage('Deploy WAR to Tomcat (from Nexus)') {
-      when {
-        allOf {
-          expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
-          expression { params.DEPLOY_TO_TOMCAT }
-        }
-      }
-      steps {
-        sshagent(credentials: ['tomcat_ssh']) {
-          script {
-            def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",     returnStdout: true).trim()
-            def artifactId = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId", returnStdout: true).trim()
-            def groupId    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId",    returnStdout: true).trim()
-
-            def isSnapshot = version.endsWith('-SNAPSHOT')
-            def releasesPath  = params.NEXUS_RELEASES_PATH.replaceAll('/+$','')
-            def snapshotsPath = params.NEXUS_SNAPSHOTS_PATH.replaceAll('/+$','')
-            def repoUrl       = isSnapshot ? "${env.NEXUS_BASE}/${snapshotsPath}" : "${env.NEXUS_BASE}/${releasesPath}"
-
-            echo "Resolving ${groupId}:${artifactId}:${version}:war from ${repoUrl} ..."
-            sh """
-              mvn -B -q org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
-                -DremoteRepositories=nexus::::${repoUrl} \
-                -Dartifact=${groupId}:${artifactId}:${version}:war \
-                -DoutputDirectory=. \
-                -Dtransitive=false
-            """
-            def warName = "${artifactId}-${version}.war"
-            echo "Downloaded WAR: ${warName}"
-
-            // Copy WAR and restart Tomcat using the parameterized paths directly.
-            sh """
-              set -e
-              echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
-              scp -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:/home/${params.TOMCAT_USER}/${params.APP_NAME}.war
-
-              echo "Restarting Tomcat and deploying WAR ..."
-              ssh -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} "set -euo pipefail; \
-                case '${params.TOMCAT_WEBAPPS}' in /|/root|'' ) echo 'Unsafe webapps path: ${params.TOMCAT_WEBAPPS}'; exit 1 ;; esac; \
-                if [ ! -d '${params.TOMCAT_WEBAPPS}' ]; then echo 'Webapps dir not found: ${params.TOMCAT_WEBAPPS}'; exit 1; fi; \
-                if [ ! -d '${params.TOMCAT_BIN}' ]; then echo 'Tomcat bin not found: ${params.TOMCAT_BIN}'; exit 1; fi; \
-                sudo rm -rf '${params.TOMCAT_WEBAPPS}/${params.APP_NAME}' '${params.TOMCAT_WEBAPPS}/${params.APP_NAME}.war' || true; \
-                sudo mv '/home/${params.TOMCAT_USER}/${params.APP_NAME}.war' '${params.TOMCAT_WEBAPPS}/'; \
-                if [ -x '${params.TOMCAT_BIN}/shutdown.sh' ]; then \
-                  sudo '${params.TOMCAT_BIN}/shutdown.sh' || true; sleep 3; sudo '${params.TOMCAT_BIN}/startup.sh'; \
-                else \
-                  sudo systemctl restart tomcat || sudo systemctl restart tomcat9 || true; \
-                fi"
-            """
-          }
-        }
-      }
+  stage('Deploy WAR to Tomcat (from Nexus)') {
+  when {
+    allOf {
+      expression { env.CURRENT_BRANCH == env.TARGET_BRANCH }
+      expression { params.DEPLOY_TO_TOMCAT }
     }
+  }
+  steps {
+    sshagent(credentials: ['tomcat_ssh']) {
+      script {
+        def version    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.version",     returnStdout: true).trim()
+        def artifactId = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.artifactId", returnStdout: true).trim()
+        def groupId    = sh(script: "mvn -q -DforceStdout help:evaluate -Dexpression=project.groupId",    returnStdout: true).trim()
+
+        def isSnapshot   = version.endsWith('-SNAPSHOT')
+        def releasesPath = params.NEXUS_RELEASES_PATH.replaceAll('/+$','')
+        def snapshotsPath= params.NEXUS_SNAPSHOTS_PATH.replaceAll('/+$','')
+        def repoUrl      = isSnapshot ? "${env.NEXUS_BASE}/${snapshotsPath}" : "${env.NEXUS_BASE}/${releasesPath}"
+
+        echo "Resolving ${groupId}:${artifactId}:${version}:war from ${repoUrl} ..."
+        sh """
+          mvn -B -q org.apache.maven.plugins:maven-dependency-plugin:3.6.1:copy \
+            -DremoteRepositories=nexus::::${repoUrl} \
+            -Dartifact=${groupId}:${artifactId}:${version}:war \
+            -DoutputDirectory=. \
+            -Dtransitive=false
+        """
+        def warName = "${artifactId}-${version}.war"
+        echo "Downloaded WAR: ${warName}"
+
+        sh """
+          set -e
+          echo "Copying ${warName} to ${params.TOMCAT_HOST} ..."
+          scp -o BatchMode=yes -o StrictHostKeyChecking=no "${warName}" ${params.TOMCAT_USER}@${params.TOMCAT_HOST}:/home/${params.TOMCAT_USER}/${params.APP_NAME}.war
+
+          echo "Restarting Tomcat and deploying WAR ..."
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=no ${params.TOMCAT_USER}@${params.TOMCAT_HOST} "set -euo pipefail; \
+            case '${params.TOMCAT_WEBAPPS}' in /|/root|'' ) echo 'Unsafe webapps path: ${params.TOMCAT_WEBAPPS}'; exit 1 ;; esac; \
+            [ -d '${params.TOMCAT_WEBAPPS}' ] || { echo 'Webapps dir not found: ${params.TOMCAT_WEBAPPS}'; exit 1; }; \
+            [ -d '${params.TOMCAT_BIN}' ] || { echo 'Tomcat bin not found: ${params.TOMCAT_BIN}'; exit 1; }; \
+            sudo rm -rf '${params.TOMCAT_WEBAPPS}/${params.APP_NAME}' '${params.TOMCAT_WEBAPPS}/${params.APP_NAME}.war' || true; \
+            sudo mv '/home/${params.TOMCAT_USER}/${params.APP_NAME}.war' '${params.TOMCAT_WEBAPPS}/'; \
+            sudo chmod +x '${params.TOMCAT_BIN}/'*.sh || true; \
+            [ -x '${params.TOMCAT_BIN}/shutdown.sh' ] && [ -x '${params.TOMCAT_BIN}/startup.sh' ] || { echo 'Tomcat scripts not executable in ${params.TOMCAT_BIN}'; exit 1; }; \
+            sudo '${params.TOMCAT_BIN}/shutdown.sh' || true; sleep 3; sudo '${params.TOMCAT_BIN}/startup.sh'"
+        """
+       }
+     }
+   }
+ }
 
     stage('Health Check') {
       when {
