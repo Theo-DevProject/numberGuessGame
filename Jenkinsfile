@@ -96,7 +96,7 @@ pipeline {
     }
 
     stage('Quality Gate') {
-      steps { timeout(time: 10, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } }
+      steps { timeout(time: 20, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } }
     }
 
     stage('Deploy to Nexus') {
