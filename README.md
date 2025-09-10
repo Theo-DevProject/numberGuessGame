@@ -1,5 +1,5 @@
 # numberGuessGame for Team 7
-Number Guess Game – DevOps CI/CD Project
+Number Guess Game – DevOps CI/CD Projects
 
 📌 Project Overview
 
