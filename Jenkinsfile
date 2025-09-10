@@ -8,17 +8,17 @@ pipeline {
     string(name: 'BRANCH_OVERRIDE', defaultValue: '', description: 'Manually override branch (normally leave blank)')
 
     // Nexus
-    string(name: 'NEXUS_HOST',           defaultValue: '52.21.103.235', description: 'Nexus host/IP')
+    string(name: 'NEXUS_HOST',           defaultValue: '34.238.171.36', description: 'Nexus host/IP')
     string(name: 'NEXUS_PORT',           defaultValue: '8081',          description: 'Nexus port')
     string(name: 'NEXUS_RELEASES_PATH',  defaultValue: 'repository/maven-releases/',  description: 'Releases path')
     string(name: 'NEXUS_SNAPSHOTS_PATH', defaultValue: 'repository/maven-snapshots/', description: 'Snapshots path')
 
     // SonarQube
-    string(name: 'SONAR_HOST_URL', defaultValue: 'http://52.72.165.200:9000', description: 'SonarQube URL')
+    string(name: 'SONAR_HOST_URL', defaultValue: 'http://54.198.74.194:9000', description: 'SonarQube URL')
 
     // Tomcat
     booleanParam(name: 'DEPLOY_TO_TOMCAT', defaultValue: true, description: 'Deploy after Nexus')
-    string(name: 'TOMCAT_HOST',    defaultValue: '54.236.97.199',                 description: 'Tomcat host/IP')
+    string(name: 'TOMCAT_HOST',    defaultValue: '34.229.251.191',                 description: 'Tomcat host/IP')
     string(name: 'TOMCAT_USER',    defaultValue: 'ubuntu',                        description: 'SSH user on Tomcat box')
     string(name: 'TOMCAT_WEBAPPS', defaultValue: '/opt/apache-tomcat-10.1.44/webapps', description: 'Tomcat webapps dir')
     string(name: 'TOMCAT_BIN',     defaultValue: '/opt/apache-tomcat-10.1.44/bin',     description: 'Tomcat bin dir')
