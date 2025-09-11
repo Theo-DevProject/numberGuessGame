@@ -95,43 +95,10 @@ pipeline {
       }
     }
 
-    // stage('Quality Gate') {
-    //  steps { timeout(time: 20, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } }
-    //}
-  stage('Quality Gate (polling)') {
-  steps {
-    script {
-      // pick up the ceTaskId written by the scanner
-      def ceTaskId = sh(
-        script: "grep -o 'ceTaskId=.*' target/sonar/report-task.txt | cut -d= -f2",
-        returnStdout: true
-      ).trim()
-
-      timeout(time: 20, unit: 'MINUTES') {
-        waitUntil {
-          def ce = sh(script: "curl -s ${params.SONAR_HOST_URL}/api/ce/task?id=${ceTaskId}", returnStdout: true).trim()
-          def obj = new groovy.json.JsonSlurper().parseText(ce)
-          echo "Compute Engine status: ${obj.task.status}"
-          return obj.task.status in ['SUCCESS','FAILED','CANCELED']
-        }
-      }
-
-      def analysisId = new groovy.json.JsonSlurper().parseText(
-        sh(script: "curl -s ${params.SONAR_HOST_URL}/api/ce/task?id=${ceTaskId}", returnStdout: true)
-      ).task.analysisId
-
-      def qgJson = sh(
-        script: "curl -s '${params.SONAR_HOST_URL}/api/qualitygates/project_status?analysisId=${analysisId}'",
-        returnStdout: true
-      ).trim()
-
-      def qg = new groovy.json.JsonSlurper().parseText(qgJson).projectStatus.status
-      echo "Quality Gate: ${qg}"
-      if (qg != 'OK') error "Quality Gate failed: ${qg}"
-    }
+  stage('Quality Gate') {
+    steps { timeout(time: 20, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } }
   }
-}
-    stage('Deploy to Nexus') {
+  stage('Deploy to Nexus') {
       when { expression { env.CURRENT_BRANCH == env.TARGET_BRANCH } }
       steps {
         script {
